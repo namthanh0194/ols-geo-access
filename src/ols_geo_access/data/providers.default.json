@@ -1,0 +1,29 @@
+{
+  "bing": {
+    "bingbot": true
+  },
+  "apple": {
+    "applebot": true
+  },
+  "duckduckgo": {
+    "duckduckbot": true
+  },
+  "google": {
+    "googlebot": true,
+    "special_crawlers": false,
+    "user_triggered_fetchers": false
+  },
+  "openai": {
+    "chatgpt_user": true,
+    "gptbot": false,
+    "oai_adsbot": false,
+    "oai_searchbot": true
+  },
+  "perplexity": {
+    "perplexitybot": true
+  },
+  "uptimerobot": {
+    "monitoring": true
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,8 @@
+{
+  "auto_reload": false,
+  "auto_update_feeds": true,
+  "blocked_status": 403,
+  "emergency_disable": false,
+  "feed_max_age_hours": 72,
+  "schema_version": 1
+}

@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+prefix=${OLS_GEO_ACCESS_PREFIX:-}
+plugin_dir="$prefix/www/server/panel/plugin/ols_geo_access"
+data_dir="$plugin_dir/data"
+test -d "$data_dir"
+if test ! -f "$data_dir/ip_allowlist.json"; then
+  cp "$plugin_dir/data/ip_allowlist.default.json" "$data_dir/ip_allowlist.json"
+  chmod 600 "$data_dir/ip_allowlist.json"
+fi
+stamp=${OLS_GEO_ACCESS_UPGRADE_ID:-$(date -u +%Y%m%dT%H%M%SZ)}
+backup="$data_dir/backups/upgrade-$stamp"
+test ! -e "$backup"
+mkdir -p "$backup"
+chmod 700 "$data_dir/backups" "$backup"
+for file in config.json domains.json providers.json woo_exceptions.json ip_allowlist.json state.json; do
+  test ! -f "$data_dir/$file" || cp -p "$data_dir/$file" "$backup/$file"
+done
+restore() {
+  for file in "$backup"/*.json; do test -e "$file" || continue; cp -p "$file" "$data_dir/$(basename "$file")"; done
+}
+trap 'restore' HUP INT TERM
+if ! python3 - "$data_dir" "$plugin_dir/data/providers.default.json" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+root = Path(sys.argv[1])
+
+def merge_missing(current, defaults):
+    for key, value in defaults.items():
+        if key not in current:
+            current[key] = value
+        elif isinstance(current[key], dict) and isinstance(value, dict):
+            merge_missing(current[key], value)
+
+providers_path = root / "providers.json"
+providers = json.loads(providers_path.read_text())
+defaults_path = Path(sys.argv[2])
+if defaults_path.is_file():
+    merge_missing(providers, json.loads(defaults_path.read_text()))
+    providers_path.write_text(json.dumps(providers, indent=2, sort_keys=True) + "\n")
+    os.chmod(providers_path, 0o600)
+
+for path in sorted(root.glob("*.json")):
+    if path.name.endswith(".default.json"):
+        continue
+    data = json.loads(path.read_text())
+    version = data.get("schema_version")
+    if version != 1:
+        raise SystemExit(f"unsupported schema in {path.name}: {version}")
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=root)
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush(); os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+PY
+then
+  restore
+  exit 1
+fi
+trap - HUP INT TERM
+panel_service="$prefix/etc/init.d/bt"
+if test -x "$panel_service"; then
+  if test "${OLS_GEO_ACCESS_RESTART_SYNC:-}" = "1"; then
+    "$panel_service" restart
+  else
+    nohup sh -c 'sleep 2; exec "$1" restart >/dev/null 2>&1' sh "$panel_service" >/dev/null 2>&1 &
+  fi
+fi
