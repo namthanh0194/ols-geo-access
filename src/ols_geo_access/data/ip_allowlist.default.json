@@ -1,4 +1,25 @@
 {
-  "entries": [],
+  "entries": [
+    {
+      "domains": [
+        "*"
+      ],
+      "id": "trusted-vps",
+      "methods": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+      ],
+      "paths": [],
+      "source_prefixes": [
+        "45.33.54.225/32",
+        "51.79.248.182/32"
+      ]
+    }
+  ],
   "schema_version": 1
 }

@@ -371,6 +371,57 @@ class ols_geo_access_main:
         save_json(self._paths, "woo_exceptions", payload, audit=self._audit)
         return {"status": True}
 
+    def get_ip_allowlist(self, _request):
+        return {"status": True, "allowlist": load_json(self._paths, "ip_allowlist")}
+
+    def save_ip_allowlist(self, request):
+        payload = self._payload(request)
+        previous = load_json(self._paths, "ip_allowlist")
+        entries = payload.get("entries")
+        if not isinstance(entries, list):
+            raise ValueError("entries must be a list")
+        user_entries = [entry for entry in entries if entry.get("id") != "local-origin"]
+        entry_ids = [entry.get("id") for entry in user_entries if isinstance(entry, dict)]
+        if len(entry_ids) != len(set(entry_ids)):
+            raise ValueError("allowlist entry ids must be unique")
+        payload = dict(payload)
+        payload["entries"] = [entry for entry in previous["entries"] if entry.get("id") == "local-origin"] + user_entries
+        assignments = load_json(self._paths, "domains")["domains"]
+        rollback_manifest = None
+        stage = "build_rollback"
+        try:
+            rollback_manifest = self._build_staging(assignments)
+            stage = "save_allowlist"
+            save_json(self._paths, "ip_allowlist", payload, audit=self._audit)
+            stage = "build_release"
+            manifest = self._build_staging(assignments)
+            stage = "apply_release"
+            deployment = apply_managed_release(
+                manifest["release_id"], self._releases_root, self._vhost_root,
+                self._state_root, self._adapter.run_config_test,
+            )
+            stage = "reload_ols"
+            self._reload()
+        except BaseException as error:
+            save_json(self._paths, "ip_allowlist", previous, audit=self._audit)
+            if rollback_manifest:
+                try:
+                    apply_managed_release(
+                        rollback_manifest["release_id"], self._releases_root,
+                        self._vhost_root, self._state_root, self._adapter.run_config_test,
+                    )
+                    self._reload()
+                except BaseException:
+                    pass
+            self._audit.record_action("ip_allowlist.auto_apply", {
+                "result": "error",
+                "stage": stage,
+                "error_type": type(error).__name__,
+                "error": str(error),
+            })
+            return {"status": False, "msg": "Không thể áp dụng IP tin cậy; cấu hình trước đó đã được khôi phục."}
+        return {"status": True, "deployment": deployment, "allowlist": payload}
+
     def get_maxmind_status(self, _request):
         credentials = get_credential_status(self._maxmind_credentials)
         database = {"path": str(self._geoip_database), "readable": self._geoip_database.is_file() and os.access(self._geoip_database, os.R_OK)}
