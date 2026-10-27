@@ -1,6 +1,15 @@
 {
+  "anthropic": {
+    "claude": true
+  },
   "bing": {
     "bingbot": true
+  },
+  "coccoc": {
+    "coccocbot": true
+  },
+  "meta": {
+    "facebook": true
   },
   "apple": {
     "applebot": true

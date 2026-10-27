@@ -2,8 +2,12 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source_dir="$root/src/ols_geo_access"
-out="$root/dist/ols_geo_access-0.1.0.zip"
 test -d "$source_dir"
+test -f "$source_dir/info.json"
+
+version=$(python3 -c "import json; print(json.load(open('$source_dir/info.json'))['versions'])")
+out="$root/dist/ols_geo_access-${version}.zip"
+
 mkdir -p "$root/dist"
 python3 - "$source_dir" "$out" <<'PY'
 import os, stat, sys, zipfile

@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+python_bin=${OLS_GEO_ACCESS_PYTHON:-/usr/bin/python3}
+"$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || {
+  echo 'Python 3.10 or newer is required.' >&2
+  exit 1
+}
+
 prefix=${OLS_GEO_ACCESS_PREFIX:-}
 case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -10,14 +16,18 @@ ols_bin="$prefix/usr/local/lsws/bin/openlitespeed"
 
 test -x "$ols_bin"
 test -d "$plugin_parent"
-mkdir -p "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
-chmod 700 "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/generated" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
-for name in config domains providers woo_exceptions ip_allowlist; do
+mkdir -p "$plugin_dir"
+if test "$source_dir" != "$plugin_dir"; then
+  cp -R "$source_dir"/. "$plugin_dir"/
+fi
+mkdir -p "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/data/proxy-trust-transactions" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
+chmod 700 "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/data/proxy-trust-transactions" "$plugin_dir/generated" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
+for name in config domains providers woo_exceptions ip_allowlist cloudflare_prefixes proxy_trust_state; do
   target="$plugin_dir/data/$name.json"
   test -f "$target" || cp "$source_dir/data/$name.default.json" "$target"
   chmod 600 "$target"
 done
-python3 - "$plugin_dir" "$source_dir" <<'PY'
+"$python_bin" - "$plugin_dir" "$source_dir" <<'PY'
 import json, subprocess, sys
 from pathlib import Path
 
@@ -41,10 +51,26 @@ chmod 600 "$plugin_dir/data/ip_allowlist.json"
 state="$plugin_dir/data/state.json"
 if test ! -f "$state"; then printf '%s\n' '{"schema_version":1}' > "$state"; fi
 chmod 600 "$state"
+cloudflare_result=$("$python_bin" "$plugin_dir/update_cloudflare.py" --ensure --allow-packaged-fallback)
 cron_dir="$prefix/etc/cron.d"
 mkdir -p "$cron_dir"
-printf '%s\n' '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' > "$cron_dir/ols-geo-access"
+printf '%s\n' \
+  '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' \
+  '23 */6 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_cloudflare.py --scheduled >> /www/server/panel/plugin/ols_geo_access/logs/cloudflare-update.log 2>&1' \
+  > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
-python3 "$plugin_dir/update_feeds.py" >> "$plugin_dir/logs/feed-update.log" 2>&1 || true
-printf '{"schema_version":1,"result":"ok","ols_binary":"%s"}\n' "$ols_bin" > "$plugin_dir/logs/install-audit.json"
+"$python_bin" "$plugin_dir/update_feeds.py" >> "$plugin_dir/logs/feed-update.log" 2>&1 || true
+"$python_bin" - "$plugin_dir/logs/install-audit.json" "$ols_bin" "$cloudflare_result" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+document = {
+    "schema_version": 1,
+    "result": "ok",
+    "ols_binary": sys.argv[2],
+    "cloudflare": json.loads(sys.argv[3]),
+}
+path.write_text(json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n")
+PY
 chmod 600 "$plugin_dir/logs/install-audit.json"

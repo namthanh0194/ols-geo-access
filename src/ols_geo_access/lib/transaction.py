@@ -3,6 +3,7 @@ import fcntl
 import os
 import re
 import secrets
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,8 +13,9 @@ from lib.audit_log import audited_mutation
 IDENTIFIER_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}")
 
 class process_lock:
-    def __init__(self, path):
+    def __init__(self, path, blocking=False):
         self._path = Path(path)
+        self._blocking = blocking
         self._handle = None
 
     def __enter__(self):
@@ -21,7 +23,10 @@ class process_lock:
         self._handle = self._path.open("a+")
         os.chmod(self._path, 0o600)
         try:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flags = fcntl.LOCK_EX
+            if not self._blocking:
+                flags |= fcntl.LOCK_NB
+            fcntl.flock(self._handle.fileno(), flags)
         except BlockingIOError as error:
             self._handle.close()
             self._handle = None
@@ -32,6 +37,11 @@ class process_lock:
         fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
         self._handle.close()
         self._handle = None
+
+@contextmanager
+def deployment_lock(state_root):
+    with process_lock(Path(state_root).resolve() / "deployment.lock", blocking=True):
+        yield
 
 def _load_manifest(root, identifier):
     if not IDENTIFIER_PATTERN.fullmatch(identifier):

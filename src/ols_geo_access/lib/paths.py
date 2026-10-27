@@ -8,6 +8,8 @@ class PluginPaths:
         "providers": "providers.json",
         "woo_exceptions": "woo_exceptions.json",
         "ip_allowlist": "ip_allowlist.json",
+        "cloudflare_prefixes": "cloudflare_prefixes.json",
+        "proxy_trust_state": "proxy_trust_state.json",
         "state": "state.json",
     }
 

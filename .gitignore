@@ -17,10 +17,13 @@ __pycache__/
 /src/ols_geo_access/data/providers.json
 /src/ols_geo_access/data/woo_exceptions.json
 /src/ols_geo_access/data/ip_allowlist.json
+/src/ols_geo_access/data/cloudflare_prefixes.json
+/src/ols_geo_access/data/proxy_trust_state.json
 /src/ols_geo_access/data/state.json
 /src/ols_geo_access/data/secrets/
 /src/ols_geo_access/data/snapshots/
 /src/ols_geo_access/data/release-state/
+/src/ols_geo_access/data/proxy-trust-transactions/
 /src/ols_geo_access/data/backups/
 /src/ols_geo_access/data/geoip-proposals/
 /src/ols_geo_access/data/geoip-transactions/

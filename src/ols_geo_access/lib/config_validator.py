@@ -5,6 +5,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,3 +227,69 @@ def restore_geoip_transaction(transaction_id, transactions_root, server_config_p
     transaction["restored_at"] = datetime.now(timezone.utc).isoformat()
     _write_json(transaction_dir / "manifest.json", transaction)
     return transaction
+
+def prune_geoip_history(backup_root, keep_completed=5):
+    if not isinstance(keep_completed, int) or keep_completed < 0:
+        raise ValueError("invalid GeoIP retention count")
+    backup_root = Path(backup_root).resolve()
+    proposals_root = backup_root / "geoip-proposals"
+    transactions_root = backup_root / "geoip-transactions"
+    incomplete_transaction_proposals = set()
+    completed_transactions = []
+    if transactions_root.is_dir():
+        for transaction_dir in transactions_root.iterdir():
+            manifest_path = transaction_dir / "manifest.json"
+            if not transaction_dir.is_dir() or not manifest_path.is_file():
+                continue
+            manifest = _load_manifest(transactions_root, transaction_dir.name)
+            status = manifest.get("status")
+            if status in {"applied", "rolled_back", "restored"}:
+                completed_transactions.append(
+                    (
+                        manifest.get("applied_at")
+                        or manifest.get("rolled_back_at")
+                        or manifest.get("restored_at")
+                        or manifest.get("created_at", ""),
+                        transaction_dir.name,
+                        transaction_dir,
+                        manifest.get("proposal_id"),
+                    )
+                )
+            else:
+                proposal_id = manifest.get("proposal_id")
+                if isinstance(proposal_id, str):
+                    incomplete_transaction_proposals.add(proposal_id)
+    completed_transactions.sort(reverse=True)
+    kept_transactions = completed_transactions[:keep_completed]
+    kept_transaction_proposals = {
+        proposal_id
+        for _timestamp, _transaction_id, _path, proposal_id in kept_transactions
+        if isinstance(proposal_id, str)
+    }
+    protected_proposals = incomplete_transaction_proposals | kept_transaction_proposals
+    removed = []
+    for _timestamp, transaction_id, path, _proposal_id in completed_transactions[keep_completed:]:
+        shutil.rmtree(path)
+        removed.append(f"geoip-transactions/{transaction_id}")
+
+    completed_proposals = []
+    protected_completed_count = 0
+    if proposals_root.is_dir():
+        for proposal_dir in proposals_root.iterdir():
+            manifest_path = proposal_dir / "manifest.json"
+            if not proposal_dir.is_dir() or not manifest_path.is_file():
+                continue
+            manifest = _load_manifest(proposals_root, proposal_dir.name)
+            proposal_id = manifest.get("proposal_id")
+            if proposal_id in kept_transaction_proposals:
+                protected_completed_count += 1
+            elif proposal_id not in protected_proposals:
+                completed_proposals.append(
+                    (manifest.get("created_at", ""), proposal_dir.name, proposal_dir)
+                )
+    completed_proposals.sort(reverse=True)
+    remaining = max(0, keep_completed - protected_completed_count)
+    for _timestamp, proposal_id, path in completed_proposals[remaining:]:
+        shutil.rmtree(path)
+        removed.append(f"geoip-proposals/{proposal_id}")
+    return removed

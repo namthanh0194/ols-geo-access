@@ -4,6 +4,29 @@
       "domains": [
         "*"
       ],
+      "id": "hubspot",
+      "methods": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+      ],
+      "paths": [],
+      "source_prefixes": [
+        "54.174.62.128/26",
+        "143.244.87.0/25",
+        "216.157.40.32/27",
+        "216.157.41.32/27",
+        "216.157.42.32/27"
+      ]
+    },
+    {
+      "domains": [
+        "*"
+      ],
       "id": "trusted-vps",
       "methods": [
         "GET",
@@ -18,6 +41,53 @@
       "source_prefixes": [
         "45.33.54.225/32",
         "51.79.248.182/32"
+      ]
+    },
+    {
+      "domains": [
+        "*"
+      ],
+      "id": "jetpack",
+      "methods": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+      ],
+      "paths": [],
+      "source_prefixes": [
+        "54.217.201.243/32",
+        "54.232.116.4/32",
+        "122.248.245.244/32",
+        "192.0.64.0/18",
+        "192.0.80.0/20",
+        "192.0.96.0/20",
+        "192.0.112.0/20",
+        "195.234.108.0/22"
+      ]
+    },
+    {
+      "domains": [
+        "*"
+      ],
+      "id": "wordfence-central",
+      "methods": [
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+      ],
+      "paths": [],
+      "source_prefixes": [
+        "44.235.211.232/32",
+        "54.68.32.247/32",
+        "54.71.203.174/32"
       ]
     }
   ],
