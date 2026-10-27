@@ -730,13 +730,15 @@ class ols_geo_access_main:
 
     def check_update(self, request):
         force = False
-        if isinstance(request, dict):
+        if hasattr(request, "get"):
             force = request.get("force") in {True, "1", "true", "True"}
+        elif hasattr(request, "force"):
+            force = getattr(request, "force") in {True, "1", "true", "True"}
         return self._updater.check_for_updates(force=force)
 
     def update_plugin(self, request):
-        version = request.get("version") if isinstance(request, dict) else None
-        download_url = request.get("download_url") if isinstance(request, dict) else None
+        version = request.get("version") if hasattr(request, "get") else getattr(request, "version", None)
+        download_url = request.get("download_url") if hasattr(request, "get") else getattr(request, "download_url", None)
         if not version:
             check = self._updater.check_for_updates(force=True)
             if not check.get("has_update"):
