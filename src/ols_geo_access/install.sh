@@ -74,3 +74,4 @@ document = {
 path.write_text(json.dumps(document, ensure_ascii=False, sort_keys=True) + "\n")
 PY
 chmod 600 "$plugin_dir/logs/install-audit.json"
+"$python_bin" "$plugin_dir/sync_icon.py"

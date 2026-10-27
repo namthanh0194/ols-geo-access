@@ -169,8 +169,16 @@ Quy trình:
 
 1. Sửa source trong `/root/ols-geo-access`.
 2. Kiểm tra và đóng gói ZIP.
-3. Đồng bộ hoặc import plugin vào aaPanel.
-4. Đối chiếu source và production bằng `cmp`.
+3. Tăng `versions` trong `src/ols_geo_access/info.json`, commit/push và tạo tag mới; không di chuyển tag đã phát hành.
+4. Người dùng bấm cập nhật trong aaPanel. Không tự đồng bộ source sang production trong quá trình phát triển.
+
+### Cập nhật thủ công và icon (từ v0.2.2)
+
+- Mỗi lần mở plugin sẽ kiểm tra GitHub trực tiếp, không chờ cache 6 giờ. Khi có bản mới, banner và nút **Cập nhật** xuất hiện; plugin không tự cài đặt.
+- Nếu GitHub không truy cập được, giao diện báo lỗi kiểm tra thay vì khẳng định đang dùng phiên bản mới nhất.
+- Khi nâng từ v0.2.0/v0.2.1, vào **Trạng thái hệ thống → Kiểm tra ngay → Cập nhật** để bỏ qua cache của bản cũ.
+- `sync_icon.py` chạy trong cài đặt/nâng cấp để đồng bộ `icon.png` sang `BTPanel/static/img/soft_ico/ico-ols_geo_access.png`. Giao diện thêm version vào URL icon của plugin khi mở để tránh dùng ảnh cũ từ cache.
+- Sau cập nhật, mở lại plugin để nạp giao diện và icon mới. Các thao tác cài/nâng cấp chỉ được kiểm thử với `OLS_GEO_ACCESS_PREFIX` trỏ vào môi trường tạm khi phát triển.
 
 ## Dữ liệu không commit
 

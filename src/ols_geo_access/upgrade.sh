@@ -98,6 +98,7 @@ backups = sorted(
 for path in backups[5:]:
     shutil.rmtree(path)
 PY
+"$python_bin" "$plugin_dir/sync_icon.py"
 panel_service="$prefix/etc/init.d/bt"
 if test -x "$panel_service"; then
   if test "${OLS_GEO_ACCESS_RESTART_SYNC:-}" = "1"; then

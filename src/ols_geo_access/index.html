@@ -114,14 +114,49 @@ html.dark .oga,body.dark .oga,body.dark-theme .oga,[theme-mode=dark] .oga,[data-
   var latestVersion = null;
   var updateDownloadUrl = null;
 
+  function refreshPluginIcon(){
+    var documents = [document];
+    try {
+      if(window.parent.document !== document) documents.push(window.parent.document);
+    } catch(error) {}
+    documents.forEach(function(panelDocument){
+      panelDocument.querySelectorAll('img[src]').forEach(function(image){
+        var source = new URL(image.src, panelDocument.baseURI);
+        if(source.origin === new URL(panelDocument.baseURI).origin && source.pathname === '/static/img/soft_ico/ico-ols_geo_access.png'){
+          source.searchParams.set('v', currentVersion);
+          if(image.src !== source.href) image.src = source.href;
+        }
+      });
+    });
+  }
+
   function loadVersionInfo(force, complete){
+    var versionReceived = false;
+    function clearUpdate(){
+      latestVersion = null;
+      updateDownloadUrl = null;
+      $('#oga-btn-update').hide();
+      $('#oga-update-banner').hide();
+      $('#plugin-do-update').hide();
+    }
+    clearUpdate();
+    $('#plugin-update-info').text('Đang kiểm tra phiên bản mới trên GitHub…');
     request_plugin('get_version', {}, function(vRes){
+      versionReceived = true;
+      if(!vRes || !vRes.status || !vRes.version){
+        $('#plugin-update-info').text('Không thể đọc phiên bản plugin. Hãy bấm Kiểm tra ngay để thử lại.');
+        if(complete) complete(false);
+        return;
+      }
       if(vRes && vRes.version) {
         currentVersion = vRes.version;
         $('#oga-version-tag').text('v' + currentVersion);
         $('#plugin-current-ver').text(currentVersion);
+        refreshPluginIcon();
       }
+      var updateReceived = false;
       request_plugin('check_update', {force: force ? 1 : 0}, function(uRes){
+        updateReceived = true;
         if(uRes && uRes.status){
           latestVersion = uRes.latest_version;
           updateDownloadUrl = uRes.download_url;
@@ -144,15 +179,23 @@ html.dark .oga,body.dark .oga,body.dark-theme .oga,[theme-mode=dark] .oga,[data-
             $('#plugin-update-info').html('Đang cài phiên bản <strong>' + esc(currentVersion) + '</strong> (Phiên bản mới nhất. Kiểm tra lúc ' + esc(checkedStr) + ').');
           }
         } else {
+          clearUpdate();
           var err = (uRes && uRes.error) ? ('Lỗi: ' + esc(uRes.error)) : 'Không thể kiểm tra phiên bản lúc này.';
           $('#plugin-update-info').html('Đang cài phiên bản <strong>' + esc(currentVersion) + '</strong>. ' + err);
         }
-        if(complete) complete(true);
+        if(complete) complete(!!(uRes && uRes.status));
       }, function(){
-        if(complete) complete(false);
+        if(!updateReceived){
+          clearUpdate();
+          $('#plugin-update-info').text('Không thể kiểm tra phiên bản lúc này. Hãy bấm Kiểm tra ngay để thử lại.');
+          if(complete) complete(false);
+        }
       });
     }, function(){
-      if(complete) complete(false);
+      if(!versionReceived){
+        $('#plugin-update-info').text('Không thể đọc phiên bản plugin. Hãy bấm Kiểm tra ngay để thử lại.');
+        if(complete) complete(false);
+      }
     });
   }
 
@@ -249,6 +292,6 @@ html.dark .oga,body.dark .oga,body.dark-theme .oga,[theme-mode=dark] .oga,[data-
   }
 
   initThemeSync();
-  loadVersionInfo(false);loadDashboard(true);loadRecovery();loadCloudflareTrust();loadDomains();loadExceptions();loadMaxMind();loadAllowlist();loadServiceSources();setTimeout(fitModal,0);
+  loadVersionInfo(true);loadDashboard(true);loadRecovery();loadCloudflareTrust();loadDomains();loadExceptions();loadMaxMind();loadAllowlist();loadServiceSources();setTimeout(fitModal,0);
 })();
 </script>
