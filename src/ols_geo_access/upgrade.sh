@@ -55,7 +55,7 @@ if defaults_path.is_file():
     os.chmod(providers_path, 0o600)
 
 for path in sorted(root.glob("*.json")):
-    if path.name.endswith(".default.json"):
+    if path.name.endswith(".default.json") or path.name.startswith("update-") or path.name in {"update-cache.json"}:
         continue
     data = json.loads(path.read_text())
     version = data.get("schema_version")
