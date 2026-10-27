@@ -129,7 +129,31 @@ class PluginUpdater:
                 return json.loads(data.decode("utf-8"))
         except urllib.error.HTTPError as error:
             if error.code == 404:
-                raise ValueError("Chưa có bản phát hành Release công khai trên GitHub.") from None
+                # Fallback to tags endpoint if formal Release has not been drafted
+                tags_url = f"https://api.github.com/repos/{self.repository}/tags"
+                tags_req = urllib.request.Request(
+                    tags_url,
+                    headers={
+                        "Accept": "application/vnd.github.v3+json",
+                        "User-Agent": "ols-geo-access-updater/1.0",
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(tags_req, timeout=15) as tags_resp:
+                        tags_data = json.loads(tags_resp.read().decode("utf-8"))
+                        if tags_data and isinstance(tags_data, list):
+                            latest_tag = tags_data[0]
+                            tag_name = latest_tag.get("name", "").strip()
+                            return {
+                                "tag_name": tag_name,
+                                "body": f"Bản phát hành {tag_name}",
+                                "html_url": f"https://github.com/{self.repository}/releases/tag/{tag_name}",
+                                "zipball_url": latest_tag.get("zipball_url"),
+                                "assets": [],
+                            }
+                except Exception:
+                    pass
+                raise ValueError("Chưa có bản phát hành Release hoặc Tag công khai trên GitHub.") from None
             if error.code in {403, 429}:
                 raise ValueError("GitHub API bị giới hạn tần suất truy cập. Vui lòng thử lại sau.") from None
             raise ValueError(f"GitHub API trả về lỗi HTTP {error.code}.") from None
