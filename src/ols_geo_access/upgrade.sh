@@ -99,11 +99,3 @@ for path in backups[5:]:
     shutil.rmtree(path)
 PY
 "$python_bin" "$plugin_dir/sync_icon.py"
-panel_service="$prefix/etc/init.d/bt"
-if test -x "$panel_service"; then
-  if test "${OLS_GEO_ACCESS_RESTART_SYNC:-}" = "1"; then
-    "$panel_service" restart
-  else
-    nohup sh -c 'sleep 2; exec "$1" restart >/dev/null 2>&1' sh "$panel_service" >/dev/null 2>&1 &
-  fi
-fi

@@ -180,6 +180,15 @@ Quy trình:
 - `sync_icon.py` chạy trong cài đặt/nâng cấp để đồng bộ `icon.png` sang `BTPanel/static/img/soft_ico/ico-ols_geo_access.png`. Giao diện thêm version vào URL icon của plugin khi mở để tránh dùng ảnh cũ từ cache.
 - Sau cập nhật, mở lại plugin để nạp giao diện và icon mới. Các thao tác cài/nâng cấp chỉ được kiểm thử với `OLS_GEO_ACCESS_PREFIX` trỏ vào môi trường tạm khi phát triển.
 
+### Xác nhận và kết quả cập nhật (v0.2.3)
+
+- Cập nhật/khôi phục dùng popup `layer` của aaPanel, không dùng hộp thoại xác nhận của trình duyệt. Popup mới chỉ xuất hiện sau khi giao diện v0.2.3 đã được tải.
+- Script nâng cấp không restart aaPanel. Plugin đã nạp lại module updater khi backend được tải; giao diện tải lại sau khi nhận kết quả thành công.
+- Backend dùng khóa để từ chối cập nhật/khôi phục đồng thời. `data/update-operation.json` lưu mã thao tác và kết quả; chỉ ghi thành công khi luồng cập nhật và dọn tệp tạm đã trả về.
+- Nếu mất phản hồi, giao diện chỉ truy vấn `get_update_status` tối đa 30 lần, không tự gửi lại lệnh cài. Số version trong `info.json` riêng lẻ không được dùng làm bằng chứng hoàn tất.
+- Nếu vẫn không xác định được kết quả, các nút thao tác được giữ khóa và giao diện yêu cầu kiểm tra lại. Không bấm cài lại liên tục.
+- Khôi phục trả lại mã nguồn backup và giữ cấu hình hiện tại; không chạy script nâng cấp của bản cũ vì script đó có thể restart aaPanel.
+
 ## Dữ liệu không commit
 
 `.gitignore` loại trừ các dữ liệu nhạy cảm và runtime như:

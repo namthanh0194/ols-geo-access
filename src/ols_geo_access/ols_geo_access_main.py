@@ -736,7 +736,11 @@ class ols_geo_access_main:
             force = getattr(request, "force") in {True, "1", "true", "True"}
         return self._updater.check_for_updates(force=force)
 
+    def get_update_status(self, _request):
+        return self._updater.get_update_status()
+
     def update_plugin(self, request):
+        operation_id = request.get("operation_id") if hasattr(request, "get") else getattr(request, "operation_id", None)
         version = request.get("version") if hasattr(request, "get") else getattr(request, "version", None)
         download_url = request.get("download_url") if hasattr(request, "get") else getattr(request, "download_url", None)
         if not version:
@@ -746,16 +750,17 @@ class ols_geo_access_main:
             version = check.get("latest_version")
             download_url = check.get("download_url")
         try:
-            res = self._updater.apply_update(version, download_url=download_url)
+            res = self._updater.apply_update(version, download_url=download_url, operation_id=operation_id)
             self._audit.record_action("plugin.update", {"version": version, "result": "success"})
             return res
         except Exception as error:
             self._audit.record_action("plugin.update", {"version": version, "result": "error", "error": str(error)})
             return {"status": False, "msg": str(error)}
 
-    def rollback_plugin(self, _request):
+    def rollback_plugin(self, request):
+        operation_id = request.get("operation_id") if hasattr(request, "get") else getattr(request, "operation_id", None)
         try:
-            res = self._updater.rollback()
+            res = self._updater.rollback(operation_id=operation_id)
             self._audit.record_action("plugin.rollback", {"result": "success" if res.get("status") else "error"})
             return res
         except Exception as error:

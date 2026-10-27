@@ -204,39 +204,108 @@ html.dark .oga,body.dark .oga,body.dark-theme .oga,[theme-mode=dark] .oga,[data-
       status('Không tìm thấy thông tin phiên bản mới.', true);
       return;
     }
-    if(!confirm('Xác nhận cập nhật plugin lên phiên bản v' + latestVersion + '?\n\nPlugin sẽ tự động sao lưu phiên bản hiện tại và dọn dẹp các tệp tạm sau khi hoàn tất.')){
-      return;
-    }
-    runButtonAction(btn, 'Đang cập nhật…', 'Đã cập nhật ✓', function(){
-      status('Đang tải bản cập nhật, xác thực và nâng cấp plugin…', false);
-    }, function(finish){
-      api('update_plugin', {version: latestVersion, download_url: updateDownloadUrl}, function(res){
-        status('Cập nhật hoàn tất! Giao diện sẽ tải lại sau giây lát…', false);
-        finish(true);
-        setTimeout(function(){ location.reload(); }, 1800);
-      }, false, function(){
-        finish(false);
-      });
+    var targetVersion = latestVersion, targetUrl = updateDownloadUrl;
+    confirmPluginAction('Cập nhật plugin', 'Cập nhật ngay',
+      'Phiên bản đang cài: <strong>v' + esc(currentVersion) + '</strong><br>Phiên bản mới: <strong>v' + esc(targetVersion) + '</strong><br><br>Plugin sẽ sao lưu mã nguồn hiện tại, cập nhật và dọn tệp tạm. Không khởi động lại aaPanel.', function(){
+      runPluginMutation('update_plugin', {version: targetVersion, download_url: targetUrl});
     });
   }
 
   function doRollbackPlugin(btn){
-    if(!confirm('Xác nhận khôi phục về phiên bản trước đó?\n\nThao tác này sẽ đưa mã nguồn plugin về bản sao lưu gần nhất.')){
-      return;
-    }
-    runButtonAction(btn, 'Đang khôi phục…', 'Đã khôi phục ✓', function(){
-      status('Đang khôi phục mã nguồn plugin về phiên bản trước…', false);
-    }, function(finish){
-      api('rollback_plugin', {}, function(res){
-        status('Khôi phục hoàn tất! Giao diện sẽ tải lại sau giây lát…', false);
-        finish(true);
-        setTimeout(function(){ location.reload(); }, 1800);
-      }, false, function(){
-        finish(false);
-      });
+    confirmPluginAction('Khôi phục plugin', 'Khôi phục',
+      'Khôi phục mã nguồn từ bản sao lưu gần nhất? Cấu hình hiện tại được giữ nguyên; không chạy lại script nâng cấp của bản cũ.', function(){
+      runPluginMutation('rollback_plugin', {});
     });
   }
 
+
+  var pluginMutationBusy = false;
+  var pluginConfirmationOpen = false;
+
+  function confirmPluginAction(title, actionLabel, message, confirmed){
+    if(pluginMutationBusy || pluginConfirmationOpen) return;
+    var panelLayer = window.layer;
+    try { if(!panelLayer) panelLayer = window.parent.layer; } catch(error) {}
+    if(!panelLayer || typeof panelLayer.confirm !== 'function'){
+      status('Không tải được popup aaPanel. Hãy mở lại plugin.', true);
+      return;
+    }
+    pluginConfirmationOpen = true;
+    panelLayer.confirm(message, {
+      title: title, icon: 3, area: '440px', closeBtn: 1, shadeClose: false,
+      btn: [actionLabel, 'Hủy'],
+      end: function(){ pluginConfirmationOpen = false; }
+    }, function(dialogIndex){
+      panelLayer.close(dialogIndex);
+      pluginConfirmationOpen = false;
+      if(!pluginMutationBusy) confirmed();
+    });
+  }
+
+  function runPluginMutation(method, args){
+    if(pluginMutationBusy) return;
+    pluginMutationBusy = true;
+    var controls = $('#oga-btn-update, #oga-banner-update-btn, #plugin-do-update, #plugin-do-rollback, #plugin-check-update');
+    controls.prop('disabled', true);
+    var operationId = 'oga-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    args.operation_id = operationId;
+    var label = method === 'update_plugin' ? 'Cập nhật' : 'Khôi phục';
+    var attempts = 0;
+    function finish(success, message){
+      status(message, !success);
+      if(success){
+        setTimeout(function(){ location.reload(); }, 1800);
+      } else {
+        pluginMutationBusy = false;
+        controls.prop('disabled', false);
+      }
+    }
+    function retryVerification(){
+      if(attempts < 30){
+        setTimeout(verifyOperation, 2000);
+      } else {
+        status('Chưa xác định được kết quả. Không bấm cập nhật lại; hãy mở lại plugin để kiểm tra trạng thái hoặc xem data/update-operation.json.', true);
+      }
+    }
+    function verifyOperation(){
+      attempts++;
+      $.ajax({
+        type: 'POST', url: '/plugin?action=a&s=get_update_status&name=ols_geo_access',
+        data: {}, dataType: 'json', timeout: 5000,
+        success: function(response){
+          var operation = response && response.operation;
+          if(response && response.status && operation && operation.operation_id === operationId){
+            if(operation.state === 'succeeded'){
+              finish(true, label + ' đã hoàn tất. Đang tải lại giao diện…');
+              return;
+            }
+            if(operation.state === 'failed' || operation.state === 'interrupted'){
+              finish(false, operation.msg || 'Thao tác bị gián đoạn. Hãy kiểm tra trạng thái trước khi thử lại.');
+              return;
+            }
+          }
+          retryVerification();
+        },
+        error: retryVerification
+      });
+    }
+    status('Đang ' + label.toLowerCase() + ' plugin. Vui lòng chờ…', false);
+    $.ajax({
+      type: 'POST', url: '/plugin?action=a&s=' + method + '&name=ols_geo_access',
+      data: args, dataType: 'json', timeout: 180000,
+      success: function(response){
+        if(response && response.status){
+          finish(true, label + ' hoàn tất. Đang tải lại giao diện…');
+        } else {
+          finish(false, (response && response.msg) || 'Thao tác không thành công.');
+        }
+      },
+      error: function(){
+        status('Mất kết nối khi chờ phản hồi. Đang kiểm tra kết quả; không gửi lại lệnh cập nhật…', false);
+        verifyOperation();
+      }
+    });
+  }
 
   function syncTheme(){
     var isDark = false;

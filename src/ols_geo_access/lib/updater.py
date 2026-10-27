@@ -1,4 +1,5 @@
 import io
+import fcntl
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
+import uuid
 from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "ols_geo_access"
@@ -101,6 +103,47 @@ class PluginUpdater:
         self.repository = repository
         self.lock_path = self.data_dir / "update.lock"
         self.cache_path = self.data_dir / "update-cache.json"
+        self.status_path = self.data_dir / "update-operation.json"
+
+    def get_update_status(self):
+        operation = None
+        if self.status_path.is_file():
+            operation = json.loads(self.status_path.read_text(encoding="utf-8"))
+        return {"status": True, "current_version": self.get_current_version(), "operation": operation}
+
+    def _write_operation(self, operation):
+        descriptor, temporary = tempfile.mkstemp(prefix="update-operation-", dir=self.data_dir)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(operation, handle, ensure_ascii=False)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.status_path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    def _run_operation(self, action, operation_id, callback):
+        operation_id = operation_id or uuid.uuid4().hex
+        if not isinstance(operation_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", operation_id):
+            raise ValueError("Mã thao tác cập nhật không hợp lệ.")
+        self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(self.lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "r+") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError("Một thao tác cập nhật/khôi phục đang chạy. Vui lòng chờ.") from None
+            operation = {"operation_id": operation_id, "action": action, "state": "running", "started_at": int(time.time())}
+            self._write_operation(operation)
+            try:
+                result = callback()
+            except Exception as error:
+                operation.update(state="failed", msg=str(error), finished_at=int(time.time()))
+                self._write_operation(operation)
+                raise
+            operation.update(state="succeeded" if result.get("status") else "failed", version=result.get("version"), msg=result.get("msg", ""), finished_at=int(time.time()))
+            self._write_operation(operation)
+            return result
 
     def get_current_version(self):
         info_path = self.plugin_dir / "info.json"
@@ -287,7 +330,10 @@ class PluginUpdater:
             if item.name not in preserved and item.is_dir():
                 shutil.rmtree(item, ignore_errors=True)
 
-    def apply_update(self, target_version, download_url=None):
+    def apply_update(self, target_version, download_url=None, operation_id=None):
+        return self._run_operation("update", operation_id, lambda: self._apply_update(target_version, download_url))
+
+    def _apply_update(self, target_version, download_url=None):
         current_version = self.get_current_version()
         if compare_versions(target_version, current_version) <= 0:
             raise ValueError(f"Phiên bản cập nhật ({target_version}) không lớn hơn phiên bản hiện tại ({current_version}).")
@@ -332,6 +378,9 @@ class PluginUpdater:
 
             if not source_root:
                 raise ValueError("Không tìm thấy cấu trúc mã nguồn plugin hợp lệ trong gói cập nhật.")
+            package_info = json.loads((source_root / "info.json").read_text(encoding="utf-8"))
+            if package_info.get("versions") != target_version:
+                raise ValueError("Phiên bản trong gói tải về không khớp bản cập nhật đã chọn.")
 
             # 3. Tạo bản backup phiên bản hiện tại vào release-backup-previous
             self.backups_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -383,7 +432,10 @@ class PluginUpdater:
                 except Exception as error:
                     # Tự động rollback nếu upgrade.sh thất bại
                     self._restore_from_backup(previous_backup)
-                    raise ValueError(f"Chạy upgrade.sh thất bại: {error}") from error
+                    details = getattr(error, "stderr", b"") or str(error)
+                    if isinstance(details, bytes):
+                        details = details.decode("utf-8", errors="replace")
+                    raise ValueError(f"Chạy upgrade.sh thất bại: {details[-2000:]}") from error
 
             # 6. Cập nhật cache
             self._write_cache({
@@ -425,7 +477,10 @@ class PluginUpdater:
                     except Exception:
                         pass
 
-    def rollback(self):
+    def rollback(self, operation_id=None):
+        return self._run_operation("rollback", operation_id, self._rollback)
+
+    def _rollback(self):
         backup_dir = self.backups_dir / "release-backup-previous"
         if not backup_dir.is_dir() or not (backup_dir / "info.json").is_file():
             return {
@@ -436,18 +491,6 @@ class PluginUpdater:
             prev_info = json.loads((backup_dir / "info.json").read_text(encoding="utf-8"))
             prev_version = str(prev_info.get("versions", "0.0.0"))
             self._restore_from_backup(backup_dir)
-
-            upgrade_script = self.plugin_dir / "upgrade.sh"
-            if upgrade_script.is_file():
-                try:
-                    subprocess.run(
-                        ["/bin/sh", str(upgrade_script)],
-                        cwd=str(self.plugin_dir),
-                        check=False,
-                        timeout=60,
-                    )
-                except Exception:
-                    pass
 
             self._write_cache({
                 "status": True,
