@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from lib.audit_log import AuditLogger
+from lib.audit_log import AuditLogger, rotate_log_file
 from lib.cloudflare_ranges import (
     CloudflareRangeRefusal,
     download_cloudflare_ranges,
@@ -257,6 +257,10 @@ def main(argv=None):
             "error": str(error),
             "fallback_used": False,
         }
+    try:
+        rotate_log_file(plugin_root / "logs" / "cloudflare-update.log")
+    except Exception:
+        pass
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0 if result.get("status") else 1
 

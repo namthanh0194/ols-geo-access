@@ -13,6 +13,7 @@ from lib.service_sources import (
     prepare_service_allowlist,
 )
 from ols_geo_access_main import ols_geo_access_main
+from lib.audit_log import rotate_log_file
 
 def main():
     data = ROOT / "data"
@@ -70,6 +71,10 @@ def main():
             "jetpack": "jetpack" in service_payloads and result.get("service_updated", False),
         },
     }, sort_keys=True))
+    try:
+        rotate_log_file(ROOT / "logs" / "feed-update.log")
+    except Exception:
+        pass
     return 0 if not errors else 1
 
 if __name__ == "__main__":

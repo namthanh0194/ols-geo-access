@@ -25,3 +25,10 @@
 - Giao diện plugin phải hỗ trợ Dark mode và Light mode tự động theo theme của aaPanel (`html.dark`, `[theme-mode="dark"]`, `[data-theme="dark"]`, `body.dark-theme`) và prefers-color-scheme của trình duyệt.
 - Tự động đồng bộ theme qua `MutationObserver`, không thêm nút chuyển đổi theme thủ công (tránh làm rối thanh điều hướng và giao diện quản trị aaPanel).
 - Icon plugin sử dụng icon vector chất lượng cao (ví dụ Lucide Globe Lock 128x128 RGBA), ghi rõ bản quyền/giấy phép sử dụng tại `THIRD_PARTY_LICENSES.md`.
+
+# Quy tắc Quản lý Log & Retention
+
+- Mọi file log của plugin (`audit.log`, `feed-update.log`, `cloudflare-update.log`) phải có cơ chế giới hạn dung lượng và xoay vòng (log rotation):
+  - Ngưỡng xoay vòng mặc định: tối đa `10MB` cho mỗi file log.
+  - Số lượng bản lưu trữ lịch sử: tối đa `5` file (`.log.1` đến `.log.5`), các bản log cũ hơn sẽ bị tự động xóa để tránh đầy dung lượng đĩa.
+  - Xử lý log phải an toàn: phân quyền `0600`, từ chối symlink và path traversal.
