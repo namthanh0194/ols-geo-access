@@ -10,6 +10,9 @@ sys.path.insert(0, str(ROOT))
 from lib.audit_log import AuditLogger
 from lib.ols_adapter import OLSAdapter
 from lib.rollback import deactivate_managed_release
+from backend_lifecycle import require_diagnostic_nginx
+from lib.backend_detector import load_persisted_backend
+from lib.paths import PluginPaths
 
 
 def main():
@@ -20,6 +23,10 @@ def main():
     plugin_root = prefix / "www/server/panel/plugin/ols_geo_access"
     if not plugin_root.is_dir() or plugin_root.is_symlink():
         raise ValueError("plugin directory is unavailable")
+    if load_persisted_backend(PluginPaths(plugin_root)) == 'nginx':
+        require_diagnostic_nginx(plugin_root)
+        print(json.dumps({'status': True, 'diagnostic_only': True, 'webserver_type': 'nginx'}))
+        return 0
     adapter = OLSAdapter()
     adapter.CONFIG_TEST_COMMAND = (
         str(prefix / "usr/local/lsws/bin/openlitespeed"),

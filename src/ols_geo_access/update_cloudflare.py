@@ -10,6 +10,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from lib.audit_log import AuditLogger, rotate_log_file
+from lib.backend_detector import load_persisted_backend
+from lib.paths import PluginPaths
 from lib.cloudflare_ranges import (
     CloudflareRangeRefusal,
     download_cloudflare_ranges,
@@ -243,6 +245,9 @@ def main(argv=None):
     prefix_text = os.environ.get("OLS_GEO_ACCESS_PREFIX", "")
     prefix = Path(prefix_text or "/")
     plugin_root = prefix / "www/server/panel/plugin/ols_geo_access"
+    if load_persisted_backend(PluginPaths(plugin_root)) == 'nginx':
+        print(json.dumps({'status': True, 'skipped': 'nginx_diagnostic_only'}))
+        return 0
     try:
         result = run(
             mode,

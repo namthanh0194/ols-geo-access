@@ -10,6 +10,7 @@ case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
 plugin_dir="$prefix/www/server/panel/plugin/ols_geo_access"
 data_dir="$plugin_dir/data"
 test -d "$data_dir"
+backend=$("$python_bin" "$plugin_dir/backend_lifecycle.py" check "$plugin_dir")
 if test -L "$data_dir/traffic_detection.json"; then
   echo 'traffic_detection.json must not be a symlink' >&2
   exit 1
@@ -31,13 +32,16 @@ backup="$data_dir/backups/upgrade-$stamp"
 test ! -e "$backup"
 mkdir -p "$backup"
 chmod 700 "$data_dir/backups" "$backup"
-for file in config.json domains.json traffic_detection.json providers.json woo_exceptions.json ip_allowlist.json cloudflare_prefixes.json proxy_trust_state.json state.json; do
+for file in config.json domains.json traffic_detection.json providers.json woo_exceptions.json ip_allowlist.json cloudflare_prefixes.json proxy_trust_state.json state.json backend_identity.json; do
   test ! -f "$data_dir/$file" || cp -p "$data_dir/$file" "$backup/$file"
 done
 restore() {
   for file in "$backup"/*.json; do test -e "$file" || continue; cp -p "$file" "$data_dir/$(basename "$file")"; done
   if test ! -f "$backup/traffic_detection.json"; then
     rm -f "$data_dir/traffic_detection.json"
+  fi
+  if test ! -f "$backup/backend_identity.json"; then
+    rm -f "$data_dir/backend_identity.json"
   fi
 }
 trap 'restore' HUP INT TERM
@@ -84,12 +88,17 @@ then
   restore
   exit 1
 fi
-if ! "$python_bin" "$plugin_dir/update_cloudflare.py" --ensure --allow-packaged-fallback; then
+if test "$backend" = openlitespeed && ! "$python_bin" "$plugin_dir/update_cloudflare.py" --ensure --allow-packaged-fallback; then
+  restore
+  exit 1
+fi
+if ! "$python_bin" "$plugin_dir/backend_lifecycle.py" persist "$plugin_dir" >/dev/null; then
   restore
   exit 1
 fi
 trap - HUP INT TERM
 cron_dir="$prefix/etc/cron.d"
+if test "$backend" = openlitespeed; then
 mkdir -p "$cron_dir"
 printf '%s\n' \
   '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' \
@@ -97,6 +106,9 @@ printf '%s\n' \
   '0 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
   > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
+else
+  rm -f "$cron_dir/ols-geo-access"
+fi
 "$python_bin" - "$data_dir/backups" <<'PY'
 import shutil, sys
 from pathlib import Path

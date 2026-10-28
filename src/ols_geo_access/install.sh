@@ -14,8 +14,8 @@ plugin_parent="$prefix/www/server/panel/plugin"
 plugin_dir="$plugin_parent/ols_geo_access"
 ols_bin="$prefix/usr/local/lsws/bin/openlitespeed"
 
-test -x "$ols_bin"
 test -d "$plugin_parent"
+backend=$("$python_bin" "$source_dir/backend_lifecycle.py" check "$plugin_dir")
 mkdir -p "$plugin_dir"
 if test "$source_dir" != "$plugin_dir"; then
   cp -R "$source_dir"/. "$plugin_dir"/
@@ -51,6 +51,16 @@ chmod 600 "$plugin_dir/data/ip_allowlist.json"
 state="$plugin_dir/data/state.json"
 if test ! -f "$state"; then printf '%s\n' '{"schema_version":1}' > "$state"; fi
 chmod 600 "$state"
+"$python_bin" "$plugin_dir/backend_lifecycle.py" persist "$plugin_dir" >/dev/null
+if test "$backend" = nginx; then
+  if test -e "$prefix/etc/cron.d/ols-geo-access"; then
+    rm -f "$prefix/etc/cron.d/ols-geo-access"
+  fi
+  printf '%s\n' '{"schema_version":1,"result":"ok","backend":"nginx","diagnostic_only":true}' > "$plugin_dir/logs/install-audit.json"
+  chmod 600 "$plugin_dir/logs/install-audit.json"
+  "$python_bin" "$plugin_dir/sync_icon.py"
+  exit 0
+fi
 cloudflare_result=$("$python_bin" "$plugin_dir/update_cloudflare.py" --ensure --allow-packaged-fallback)
 cron_dir="$prefix/etc/cron.d"
 mkdir -p "$cron_dir"

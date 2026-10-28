@@ -21,6 +21,9 @@ __pycache__/
 /src/ols_geo_access/data/cloudflare_prefixes.json
 /src/ols_geo_access/data/proxy_trust_state.json
 /src/ols_geo_access/data/state.json
+/src/ols_geo_access/data/backend_identity.json
+/src/ols_geo_access/data/backend-identity.lock
+/src/ols_geo_access/data/nginx-release-state/
 /src/ols_geo_access/data/secrets/
 /src/ols_geo_access/data/snapshots/
 /src/ols_geo_access/data/release-state/

@@ -4,6 +4,15 @@ Plugin aaPanel cho OpenLiteSpeed giúp áp dụng chính sách truy cập theo q
 
 > Plugin là third-party plugin. Không sửa file core aaPanel trong `class/` hoặc `class_v2/`.
 
+## Phiên bản 0.2.9 — Nginx chẩn đoán
+
+- Tự xác minh webserver aaPanel đang thực sự phục vụ HTTP/HTTPS và lưu định danh backend; từ chối cài/nâng cấp khi runtime không rõ hoặc khác backend đã lưu.
+- OpenLiteSpeed giữ chức năng bảo vệ và lịch cập nhật hiện có. Nâng cấp từ bản cũ tự tạo định danh, không cần template mới trong `data/`.
+- aaPanel + Nginx có thể cài để xem dashboard, khả năng module và danh sách website. **Chưa cho phép lưu/áp dụng rule Nginx**, chưa bảo vệ truy cập trên Nginx.
+- Chế độ Nginx không cài cron feed/Cloudflare/traffic, không thay cấu hình webserver, không reload Nginx và không cài module GeoIP2. Scheduler cũ chạy vào bản này sẽ bỏ qua backend Nginx.
+- Gỡ bản chẩn đoán không can thiệp webserver. Nếu phát hiện state/rule của một bản Nginx khác, installer/upgrader/uninstaller dừng để tránh xóa cấu hình chưa được xác minh.
+- Transaction Nginx có kiểm tra xung đột và giữ file phục hồi nhưng chưa được nối vào API ghi; không coi tính năng này là đã sẵn sàng production.
+
 ## Tính năng
 
 - Chính sách `VN_ONLY` theo từng website OpenLiteSpeed.
@@ -42,7 +51,7 @@ Plugin aaPanel cho OpenLiteSpeed giúp áp dụng chính sách truy cập theo q
 
 ## Yêu cầu
 
-- aaPanel đã cài OpenLiteSpeed.
+- aaPanel chạy OpenLiteSpeed; hoặc Nginx nếu chỉ sử dụng chế độ chẩn đoán.
 - Quyền `root` để aaPanel cài plugin, tạo cron và ghi cấu hình OpenLiteSpeed.
 - Python 3.10 trở lên tại `/usr/bin/python3`.
 - Tài khoản MaxMind khi muốn tự tải `GeoLite2-Country.mmdb`.

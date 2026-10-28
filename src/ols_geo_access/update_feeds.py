@@ -14,8 +14,13 @@ from lib.service_sources import (
 )
 from ols_geo_access_main import ols_geo_access_main
 from lib.audit_log import rotate_log_file
+from lib.backend_detector import load_persisted_backend
+from lib.paths import PluginPaths
 
 def main():
+    if load_persisted_backend(PluginPaths(ROOT)) == 'nginx':
+        print(json.dumps({'status': True, 'skipped': 'nginx_diagnostic_only'}))
+        return 0
     data = ROOT / "data"
     settings = json.loads((data / "config.json").read_text())
     if not settings.get("auto_update_feeds", True):

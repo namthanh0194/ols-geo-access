@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 import lib.maxmind as maxmind_module
 import lib.bot_activity as bot_activity_module
@@ -20,6 +21,9 @@ import lib.rollback as rollback_module
 import lib.service_sources as service_sources_module
 import lib.updater as updater_module
 import lib.traffic_detection as traffic_detection_module
+import lib.domain_inventory as domain_inventory_module
+import lib.backend_detector as backend_detector_module
+import lib.nginx_adapter as nginx_adapter_module
 
 importlib.reload(paths_module)
 importlib.reload(maxmind_module)
@@ -33,6 +37,9 @@ importlib.reload(rollback_module)
 importlib.reload(service_sources_module)
 importlib.reload(updater_module)
 importlib.reload(traffic_detection_module)
+importlib.reload(domain_inventory_module)
+importlib.reload(backend_detector_module)
+importlib.reload(nginx_adapter_module)
 from lib.updater import PluginUpdater
 from lib.traffic_detection import classify_addresses, local_origin_addresses, observe, resolve_addresses
 
@@ -53,6 +60,8 @@ from lib.cloudflare_ranges import (
 )
 from lib.feed_updater import PROVIDER_SOURCES, enabled_feeds, enabled_snapshot_names
 from lib.ols_adapter import OLSAdapter
+from lib.nginx_adapter import NginxAdapter
+from lib.backend_detector import detect_webserver_environment, load_persisted_backend
 from lib.proxy_trust_audit import (
     ProxyTrustBlocking,
     ProxyTrustResult,
@@ -83,7 +92,7 @@ from lib.deployment_journal import (
     recover_interrupted_release,
     set_operation_status,
 )
-from lib.domain_inventory import collect_domains
+from lib.domain_inventory import collect_domains, collect_domains_nginx
 from lib.maxmind import (
     MaxMindRecoveryRequired,
     create_country_lookup,
@@ -112,17 +121,37 @@ from lib.rollback import (
 from lib.transaction import deployment_lock, process_lock
 
 
+def _backend_api(ols_only=True):
+    def decorate(method):
+        @wraps(method)
+        def dispatch(self, *args, **kwargs):
+            backend = self._backend_status()
+            if ols_only and not backend["mutation_allowed"]:
+                return self._backend_refusal(backend)
+            try:
+                response = method(self, *args, **kwargs)
+            except (OSError, ValueError) as error:
+                if ols_only:
+                    raise
+                response = {"status": False, "code": "backend_read_error", "msg": str(error)}
+            response.setdefault("webserver_type", backend["webserver_type"])
+            response.setdefault("backend", backend)
+            return response
+        return dispatch
+    return decorate
+
+
 class ols_geo_access_main:
     VERSION = "0.1.0"
 
     def __init__(
         self,
         adapter=None,
-        vhost_root=Path("/www/server/panel/vhost/openlitespeed"),
-        server_config_path=Path("/usr/local/lsws/conf/httpd_config.conf"),
+        vhost_root=None,
+        server_config_path=None,
         required_proxy_prefixes=None,
-        releases_root=Path("/www/server/panel/plugin/ols_geo_access/generated/releases"),
-        state_root=Path("/www/server/panel/plugin/ols_geo_access/data/release-state"),
+        releases_root=None,
+        state_root=None,
         geoip_database=Path("/usr/local/share/GeoIP/GeoLite2-Country.mmdb"),
         plugin_root=Path("/www/server/panel/plugin/ols_geo_access"),
         database_path=Path("/www/server/panel/data/default.db"),
@@ -137,12 +166,38 @@ class ols_geo_access_main:
         clock=None,
         traffic_resolver=resolve_addresses,
         origin_address_loader=local_origin_addresses,
+        environment_reader=None,
     ):
-        self._adapter = adapter or OLSAdapter()
-        self._vhost_root = Path(vhost_root)
-        self._server_config_path = Path(server_config_path)
         self._plugin_root = Path(plugin_root)
         self._paths = PluginPaths(self._plugin_root)
+        self._environment_reader = environment_reader or detect_webserver_environment
+        self._environment = {}
+        self._persisted_backend = "unknown"
+        self._adapter_error = ""
+        try:
+            self._environment = self._environment_reader()
+            self._persisted_backend = load_persisted_backend(self._paths)
+        except (OSError, ValueError) as error:
+            self._adapter_error = str(error)
+        detected = self._environment.get("backend", "unknown")
+        self._webserver_type = self._persisted_backend if self._persisted_backend != "unknown" else detected
+        if self._webserver_type not in {"openlitespeed", "nginx"}:
+            self._webserver_type = "unknown"
+        nginx = self._webserver_type == "nginx"
+        self._vhost_root = Path(vhost_root or ("/www/server/panel/vhost/nginx" if nginx else "/www/server/panel/vhost/openlitespeed"))
+        self._server_config_path = Path(server_config_path or self._environment.get("main_config") or (
+            "/www/server/nginx/conf/nginx.conf" if nginx else "/usr/local/lsws/conf/httpd_config.conf"
+        ))
+        runtime_verified = self._backend_status()["runtime_verified"]
+        self._adapter = adapter
+        if self._adapter is None and runtime_verified:
+            try:
+                self._adapter = NginxAdapter(
+                    self._environment["binary"], self._server_config_path,
+                    prefix=self._environment.get("prefix"), environment_reader=self._environment_reader,
+                ) if nginx else OLSAdapter()
+            except (OSError, ValueError) as error:
+                self._adapter_error = str(error)
         self._updater = PluginUpdater(plugin_dir=self._plugin_root)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._traffic_resolver = traffic_resolver
@@ -170,8 +225,8 @@ class ols_geo_access_main:
                 "blocking": False,
                 "checked_at": None,
             }
-        self._releases_root = Path(releases_root)
-        self._state_root = Path(state_root)
+        self._releases_root = Path(releases_root or self._plugin_root / "generated" / ("nginx-releases" if nginx else "releases"))
+        self._state_root = Path(state_root or self._paths.data / ("nginx-release-state" if nginx else "release-state"))
         self._geoip_database = Path(geoip_database)
         self._database_path = Path(database_path)
         self._snapshots_root = Path(snapshots_root) if snapshots_root else self._plugin_root / "data" / "snapshots"
@@ -188,6 +243,68 @@ class ols_geo_access_main:
         self._country_lookup_override = country_lookup
         self._cached_country_lookup = None
         self._cached_geoip_signature = None
+
+    def _backend_status(self):
+        environment = {}
+        persisted = "unknown"
+        code = None
+        reason = ""
+        try:
+            environment = self._environment_reader()
+            persisted = load_persisted_backend(self._paths)
+            if self._adapter_error:
+                code, reason = "backend_identity_error", self._adapter_error
+            elif (environment.get("confidence") != "verified" or environment.get("is_container")
+                  or environment.get("backend") not in {"openlitespeed", "nginx"}
+                  or not all(environment.get(key) for key in ("binary", "main_config", "master_pid", "start_time"))):
+                code, reason = "backend_unverified", "Chưa xác minh được webserver host; không thay đổi cấu hình."
+            elif persisted == "unknown":
+                code, reason = "backend_identity_missing", "Chưa có định danh backend được lưu; không tự nhận quyền quản lý webserver."
+            elif persisted != environment["backend"]:
+                code, reason = "backend_identity_mismatch", "Webserver hiện tại khác backend đã lưu; cần xử lý chuyển đổi riêng."
+            elif persisted != self._persisted_backend:
+                code, reason = "backend_identity_changed", "Định danh backend đã thay đổi; hãy mở lại plugin để kiểm tra."
+            elif any(environment.get(key) != self._environment.get(key) for key in (
+                "backend", "binary", "main_config", "prefix", "master_pid", "start_time", "is_container",
+            )):
+                code, reason = "backend_runtime_changed", "Runtime webserver đã thay đổi; hãy mở lại plugin để kiểm tra."
+            elif hasattr(self, "_adapter") and self._adapter is None:
+                code, reason = "backend_adapter_unavailable", "Adapter webserver chưa sẵn sàng; hãy mở lại plugin để kiểm tra."
+        except (OSError, ValueError) as error:
+            code, reason = "backend_identity_error", str(error)
+        verified = code is None
+        if verified and self._webserver_type == "nginx":
+            code = "nginx_diagnostic_only"
+            reason = "Nginx hiện chỉ chẩn đoán: cơ chế triển khai/khôi phục và lifecycle chưa đủ điều kiện an toàn. Chưa cho phép lưu hoặc áp dụng rule."
+        return {
+            "webserver_type": self._webserver_type,
+            "detected_webserver_type": environment.get("backend", "unknown"),
+            "persisted_webserver_type": persisted,
+            "runtime_verified": verified,
+            "diagnostic_only": code is not None,
+            "mutation_allowed": code is None,
+            "code": code, "reason": reason,
+        }
+
+    @staticmethod
+    def _backend_refusal(backend):
+        return {"status": False, "code": backend["code"], "msg": backend["reason"],
+                "webserver_type": backend["webserver_type"], "backend": backend}
+
+    def _require_ols_backend(self):
+        backend = self._backend_status()
+        if not backend["mutation_allowed"]:
+            raise RuntimeError(backend["reason"])
+
+    def _collect_backend_domains(self, settings):
+        arguments = {
+            "traffic_modes": {domain: value["traffic_mode"] for domain, value in settings.items()},
+            "managed_domains": {domain for domain, value in settings.items() if value.get("enabled") and value.get("group") != "NONE"},
+        }
+        if self._webserver_type == "nginx":
+            return collect_domains_nginx(self._database_path, self._vhost_root,
+                                         config_prefix=self._server_config_path.parent, **arguments)
+        return collect_domains(self._database_path, self._vhost_root, **arguments)
 
     def _country_lookup(self):
         if self._country_lookup_override is not None:
@@ -336,6 +453,7 @@ class ols_geo_access_main:
         return recovery
 
     def _recover_before_mutation(self):
+        self._require_ols_backend()
         return recover_interrupted_release(
             self._plugin_root,
             self._state_root,
@@ -409,6 +527,7 @@ class ols_geo_access_main:
         action_name,
         expected_domains=None,
     ):
+        self._require_ols_backend()
         proposed_bytes = {
             str(self._paths.data_file(name).relative_to(self._paths.root)):
                 self._json_bytes(name, payload)
@@ -486,6 +605,7 @@ class ols_geo_access_main:
             return deployment
 
     def _deploy_existing_release(self, release_id, action_name):
+        self._require_ols_backend()
         with deployment_lock(self._state_root):
             self._recover_before_mutation()
             current_path = self._state_root / "current.json"
@@ -545,6 +665,7 @@ class ols_geo_access_main:
             action_name=action_name,
         )
 
+    @_backend_api()
     def apply_scheduled_updates(self, snapshot_candidates, allowlist_candidate=None):
         if not isinstance(snapshot_candidates, dict):
             raise ValueError("snapshot candidates must be an object")
@@ -783,6 +904,7 @@ class ols_geo_access_main:
             self._audit.record_action("plugin.rollback", {"result": "error", "error": str(error)})
             return {"status": False, "msg": str(error)}
 
+    @_backend_api()
     def audit_baseline(self, _request):
         return {
             "status": True,
@@ -791,12 +913,14 @@ class ols_geo_access_main:
             ),
         }
 
+    @_backend_api()
     def audit_proxy_trust(self, request):
         domain = request.get("domain", "")
         traffic_mode = request.get("traffic_mode", "unknown")
         report = self._proxy_trust_report(domain, traffic_mode)
         return {"status": True, "report": asdict(report)}
 
+    @_backend_api()
     def get_cloudflare_trust_status(self, _request):
         self._reload_cloudflare_state()
         snapshot = self._cloudflare_snapshot or {
@@ -844,6 +968,7 @@ class ols_geo_access_main:
             },
         }
 
+    @_backend_api(ols_only=False)
     def check_cloudflare_ranges(self, _request):
         self._reload_cloudflare_state()
         try:
@@ -873,6 +998,7 @@ class ols_geo_access_main:
             },
         }
 
+    @_backend_api()
     def repair_cloudflare_trust(self, _request):
         self._reload_cloudflare_state()
         recovery = inspect_proxy_trust_recovery(
@@ -921,6 +1047,7 @@ class ols_geo_access_main:
         }
 
     def _build_staging(self, assignments, payload=None, build_overrides=None):
+        self._require_ols_backend()
         payload = payload or {}
         build_overrides = build_overrides or {}
         exceptions = build_overrides.get("exceptions")
@@ -957,6 +1084,7 @@ class ols_geo_access_main:
             audit=self._audit,
         )
 
+    @_backend_api()
     def build_staging(self, request):
         payload = self._payload(request) if request else {}
         assignments = load_json(self._paths, "domains")["domains"]
@@ -964,6 +1092,7 @@ class ols_geo_access_main:
         return {"status": True, "release": manifest}
 
     def _reload(self):
+        self._require_ols_backend()
         try:
             token = self._adapter.issue_reload_token()
             result = self._adapter.reload_gracefully(token)
@@ -985,6 +1114,7 @@ class ols_geo_access_main:
         return result
 
     def _ensure_geoip_config(self):
+        self._require_ols_backend()
         text = self._server_config_path.read_text(errors="replace")
         expected = re.compile(r"(?m)^\s*geoipdb\s+" + re.escape(str(self._geoip_database)) + r"\s*\{")
         if expected.search(text):
@@ -1018,6 +1148,7 @@ class ols_geo_access_main:
         )
 
     def _install_maxmind_candidate(self, candidate):
+        self._require_ols_backend()
         return install_country_database(
             candidate,
             self._geoip_database,
@@ -1029,18 +1160,21 @@ class ols_geo_access_main:
             audit=self._audit,
         )
 
+    @_backend_api()
     def apply_release(self, request):
         deployment = self._deploy_existing_release(
             request["release_id"], "release.manual_apply"
         )
         return {"status": True, "deployment": deployment}
 
+    @_backend_api()
     def list_releases(self, _request):
         return {
             "status": True,
             "releases": list_managed_releases(self._releases_root, self._state_root),
         }
 
+    @_backend_api()
     def get_deployment_recovery_status(self, _request):
         return {
             "status": True,
@@ -1056,6 +1190,7 @@ class ols_geo_access_main:
             ),
         }
 
+    @_backend_api()
     def recover_deployment(self, _request):
         try:
             recovery = recover_interrupted_release(
@@ -1075,6 +1210,7 @@ class ols_geo_access_main:
             }
         return {"status": True, "recovery": recovery}
 
+    @_backend_api()
     def rollback_release(self, request):
         current_path = self._state_root / "current.json"
         if not current_path.is_file():
@@ -1086,50 +1222,79 @@ class ols_geo_access_main:
         deployment = self._deploy_existing_release(previous, "release.manual_rollback")
         return {"status": True, "deployment": deployment}
 
+    @_backend_api(ols_only=False)
     def get_dashboard(self, _request):
-        config_test = self._adapter.run_config_test()
+        backend = self._backend_status()
+        if not backend["runtime_verified"]:
+            return {"status": True, "backend": backend, "dashboard": {
+                "service": {"pid": None},
+                "config_test": {"valid": None, "exit_code": None, "errors": 0, "warnings": 0,
+                                "error_lines": [], "warning_lines": [backend["reason"]], "skipped": True},
+                "geoip": {"path": str(self._geoip_database), "readable": False},
+                "domains": {"total": None, "protected": None, "active": None},
+                "feeds": {}, "release": {"current": None, "previous": None}, "capabilities": {},
+            }}
+        nginx = self._webserver_type == "nginx"
+        capabilities = {}
+        config_test = None
+        if nginx:
+            capabilities = {"realip": self._adapter.check_realip_support(), "geoip2": self._adapter.check_geoip2_support()}
+            if capabilities["geoip2"]:
+                config_test = self._adapter.test_config()
+        else:
+            config_test = self._adapter.run_config_test()
         domains_config = load_json(self._paths, "domains")
         managed_domains = {
             domain for domain, settings in domains_config["domains"].items()
             if settings.get("enabled") and settings.get("group") != "NONE"
         }
-        records = collect_domains(
-            self._database_path,
-            self._vhost_root,
-            traffic_modes={domain: value["traffic_mode"] for domain, value in domains_config["domains"].items()},
-            managed_domains=managed_domains,
-        )
+        records = self._collect_backend_domains(domains_config["domains"])
         feeds = {}
         if self._snapshots_root.is_dir():
             for path in sorted(self._snapshots_root.glob("*.json")):
                 feeds[path.stem] = json.loads(path.read_text())
         current_path = self._state_root / "current.json"
-        current = json.loads(current_path.read_text()) if current_path.is_file() else {}
-        service_pid = None
-        if self._service_pid_path.is_file():
+        current = json.loads(current_path.read_text()) if not nginx and current_path.is_file() else {}
+        service_pid = self._environment.get("master_pid") if nginx else None
+        if not nginx and self._service_pid_path.is_file():
             service_pid = self._service_pid_path.read_text(errors="replace").strip().split()[0]
-        return {"status": True, "dashboard": {
+        config_report = {"valid": config_test.valid, "exit_code": config_test.exit_code, "errors": len(config_test.errors), "warnings": len(config_test.warnings), "error_lines": list(config_test.errors), "warning_lines": list(config_test.warnings)} if config_test is not None else {
+            "valid": None, "exit_code": None, "errors": 0, "warnings": 1, "error_lines": [],
+            "warning_lines": ["Thiếu module GeoIP2 trong Nginx đang chạy; plugin không tự cài module."], "skipped": True,
+        }
+        return {"status": True, "backend": backend, "dashboard": {
             "service": {"pid": service_pid},
-            "config_test": {"valid": config_test.valid, "exit_code": config_test.exit_code, "errors": len(config_test.errors), "warnings": len(config_test.warnings), "error_lines": list(config_test.errors), "warning_lines": list(config_test.warnings)},
+            "config_test": config_report,
+            "capabilities": capabilities,
             "geoip": {"path": str(self._geoip_database), "readable": self._geoip_database.is_file() and os.access(self._geoip_database, os.R_OK)},
-            "domains": {"total": len(records), "protected": len(managed_domains), "active": sum(item.status == "active" for item in records)},
+            "domains": {"total": len(records), "protected": None if nginx else len(managed_domains), "configured": len(managed_domains), "active": sum(item.status == "active" for item in records)},
             "feeds": feeds,
             "release": {"current": current.get("release_id"), "previous": current.get("previous_release")},
         }}
 
+    @_backend_api(ols_only=False)
     def get_domains(self, _request):
+        backend = self._backend_status()
+        if not backend["runtime_verified"]:
+            return self._backend_refusal(backend)
         settings = load_json(self._paths, "domains")["domains"]
         observations = self._load_traffic_detection()["domains"]
-        managed = {domain for domain, item in settings.items() if item.get("enabled") and item.get("group") != "NONE"}
-        records = collect_domains(self._database_path, self._vhost_root, traffic_modes={domain: item["traffic_mode"] for domain, item in settings.items()}, managed_domains=managed)
+        records = self._collect_backend_domains(settings)
         result = []
-        server_config_text = self._server_config_text()
+        server_config_text = self._server_config_text() if self._webserver_type == "openlitespeed" else None
         for record in records:
             item = asdict(record)
             item.update(settings.get(record.domain, {"group": "NONE", "traffic_mode": "unknown", "enabled": False}))
             item.setdefault("traffic_auto", record.domain not in settings)
             observation = observations.get(record.domain)
             item["traffic_detection"] = observation if item["traffic_auto"] and observation and observation.get("assignment") == settings.get(record.domain) else None
+            item["can_edit"] = backend["mutation_allowed"]
+            if self._webserver_type == "nginx":
+                item["proxy_trust_state"] = "not_verified"
+                item["proxy_trust_blocking"] = True
+                item["proxy_trust_remediation"] = ["Nginx cần xác minh Trusted Proxy ở cấp server; không dùng cấu hình OLS hoặc trust toàn cục."]
+                result.append(item)
+                continue
             proxy_report = self._proxy_trust_report(
                 record.domain,
                 item["traffic_mode"],
@@ -1152,6 +1317,7 @@ class ols_geo_access_main:
         config_store_module.validate_traffic_detection(payload)
         return payload
 
+    @_backend_api()
     def refresh_traffic_modes(self, _request):
         try:
             with process_lock(self._state_root / "traffic-detection.lock"):
@@ -1160,6 +1326,7 @@ class ols_geo_access_main:
             return {"status": False, "msg": str(error)}
 
     def _refresh_traffic_modes(self):
+        self._require_ols_backend()
         baseline = load_json(self._paths, "domains")
         previous = self._load_traffic_detection()["domains"]
         proposed = copy.deepcopy(baseline)
@@ -1213,6 +1380,7 @@ class ols_geo_access_main:
                 save_json(self._paths, "traffic_detection", detection, audit=self._audit)
         return {"status": True, "checked": len(observations)}
 
+    @_backend_api()
     def get_bot_activity(self, request):
         period = request.get("period", "24h")
         if period not in {"24h", "7d"}:
@@ -1292,6 +1460,7 @@ class ols_geo_access_main:
         })
         return {"status": True, "activity": activity}
 
+    @_backend_api()
     def get_traffic_activity(self, request):
         period = request.get("period", "24h")
         if period not in {"24h", "7d"}:
@@ -1385,6 +1554,7 @@ class ols_geo_access_main:
         })
         return {"status": True, "activity": activity}
 
+    @_backend_api()
     def get_access_policy_status(self, request):
         period = request.get("period", "24h")
         traffic_report = self.get_traffic_activity({"period": period})
@@ -1447,6 +1617,7 @@ class ols_geo_access_main:
                 "summary": traffic_report["activity"]["summary"],
             },
         }
+    @_backend_api()
     def save_domains(self, request):
         payload = self._payload(request)
         try:
@@ -1490,6 +1661,7 @@ class ols_geo_access_main:
             "exceptions": load_json(self._paths, "woo_exceptions"),
         }
 
+    @_backend_api()
     def save_exceptions(self, request):
         payload = self._payload(request)
         assignments = load_json(self._paths, "domains")["domains"]
@@ -1521,6 +1693,7 @@ class ols_geo_access_main:
     def get_ip_allowlist(self, _request):
         return {"status": True, "allowlist": load_json(self._paths, "ip_allowlist")}
 
+    @_backend_api()
     def save_ip_allowlist(self, request):
         payload = self._payload(request)
         previous = load_json(self._paths, "ip_allowlist")
@@ -1567,6 +1740,7 @@ class ols_geo_access_main:
             "sources": describe_service_sources(allowlist, state),
         }
 
+    @_backend_api()
     def update_service_ip_sources(self, request):
         payload = self._payload(request) if request else {}
         target_id = payload.get("id", "jetpack")
@@ -1633,6 +1807,7 @@ class ols_geo_access_main:
             database.update({"size": self._geoip_database.stat().st_size, "modified_at": self._geoip_database.stat().st_mtime})
         return {"status": True, "credentials": credentials, "database": database}
 
+    @_backend_api()
     def save_maxmind_credentials(self, request):
         payload = self._payload(request)
         candidate_credentials = (
@@ -1684,6 +1859,7 @@ class ols_geo_access_main:
             "geoip": {"active": True, "transaction": database["config_transaction"]},
         }
 
+    @_backend_api()
     def update_geoip_database(self, _request):
         try:
             candidate = self._maxmind_downloader(
@@ -1717,9 +1893,11 @@ class ols_geo_access_main:
             "geoip": {"active": True, "transaction": result["config_transaction"]},
         }
 
+    @_backend_api()
     def issue_reload_token(self, _request):
         return {"status": True, "token": self._adapter.issue_reload_token()}
 
+    @_backend_api()
     def reload_ols(self, request):
         try:
             result = self._adapter.reload_gracefully(request.get("token", ""))

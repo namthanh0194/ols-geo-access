@@ -3,6 +3,7 @@ from pathlib import Path
 
 class PluginPaths:
     DATA_FILES = {
+        "backend_identity": "backend_identity.json",
         "config": "config.json",
         "domains": "domains.json",
         "traffic_detection": "traffic_detection.json",
