@@ -200,6 +200,13 @@ Quy trình:
 - Nếu vẫn không xác định được kết quả, các nút thao tác được giữ khóa và giao diện yêu cầu kiểm tra lại. Không bấm cài lại liên tục.
 - Khôi phục trả lại mã nguồn backup và giữ cấu hình hiện tại; không chạy script nâng cấp của bản cũ vì script đó có thể restart aaPanel.
 
+### Sửa tương thích nâng cấp (v0.2.6)
+
+- Updater cũ giữ nguyên thư mục `data/`, nên nâng cấp không được phụ thuộc vào template mới trong thư mục này. Script nâng cấp tự tạo `traffic_detection.json` rỗng bằng cơ chế ghi atomic hiện có nếu chưa có file, với quyền `0600`.
+- Trạng thái nhận diện đã có được giữ nguyên và sao lưu trước migration. Nếu migration hoặc bước khởi tạo Cloudflare thất bại, khôi phục trạng thái cũ hoặc xóa riêng file trạng thái vừa tạo; không reset cấu hình website, dữ liệu riêng hay log.
+- Backend nạp lại bảng đường dẫn dữ liệu khi hot reload để nhận diện file trạng thái mới, không cần khởi động lại aaPanel.
+- Kiểm thử tương thích dùng mã nguồn và updater thật từ các tag phiên bản cũ, bao gồm trường hợp thiếu cả file trạng thái lẫn template nhận diện.
+
 ## Dữ liệu không commit
 
 `.gitignore` loại trừ các dữ liệu nhạy cảm và runtime như:

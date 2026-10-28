@@ -8,6 +8,8 @@
 # Quy tắc Versioning & Update Cơ chế Dọn rác
 
 - Phiên bản được định nghĩa chuẩn tại `src/ols_geo_access/info.json` (trường `versions`). Script đóng gói `scripts/package.sh` và API cập nhật luôn đọc động phiên bản từ file này.
+- Updater cũ bảo toàn `data/` và không chép template mới vào đó. Migration phải tự khởi tạo trạng thái mới khi cần, không phụ thuộc vào template chỉ có trong gói mới và không ghi đè dữ liệu đang dùng.
+- Kiểm thử đường nâng cấp phải tạo bản cài từ mã nguồn/tag cũ và chạy updater thật của bản đó; không chỉ chép source hiện tại rồi sửa số version để giả lập bản cũ.
 - Cơ chế Update plugin từ GitHub repository (ví dụ `namthanh0194/ols-geo-access`):
   - Phải kiểm tra checksum/tính toàn vẹn trước khi giải nén.
   - Phải sao lưu phiên bản hiện tại trước khi ghi đè để hỗ trợ rollback tức thì nếu có lỗi.

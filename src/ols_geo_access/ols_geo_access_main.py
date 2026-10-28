@@ -13,6 +13,7 @@ import lib.bot_activity as bot_activity_module
 import lib.cloudflare_ranges as cloudflare_ranges_module
 import lib.config_generator as config_generator_module
 import lib.config_store as config_store_module
+import lib.paths as paths_module
 import lib.proxy_trust_config as proxy_trust_config_module
 import lib.proxy_trust_transaction as proxy_trust_transaction_module
 import lib.rollback as rollback_module
@@ -20,6 +21,7 @@ import lib.service_sources as service_sources_module
 import lib.updater as updater_module
 import lib.traffic_detection as traffic_detection_module
 
+importlib.reload(paths_module)
 importlib.reload(maxmind_module)
 importlib.reload(bot_activity_module)
 importlib.reload(cloudflare_ranges_module)

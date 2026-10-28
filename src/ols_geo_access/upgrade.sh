@@ -10,9 +10,9 @@ case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
 plugin_dir="$prefix/www/server/panel/plugin/ols_geo_access"
 data_dir="$plugin_dir/data"
 test -d "$data_dir"
-if test ! -f "$data_dir/traffic_detection.json"; then
-  cp "$data_dir/traffic_detection.default.json" "$data_dir/traffic_detection.json"
-  chmod 600 "$data_dir/traffic_detection.json"
+if test -L "$data_dir/traffic_detection.json"; then
+  echo 'traffic_detection.json must not be a symlink' >&2
+  exit 1
 fi
 if test ! -f "$data_dir/ip_allowlist.json"; then
   cp "$plugin_dir/data/ip_allowlist.default.json" "$data_dir/ip_allowlist.json"
@@ -31,11 +31,14 @@ backup="$data_dir/backups/upgrade-$stamp"
 test ! -e "$backup"
 mkdir -p "$backup"
 chmod 700 "$data_dir/backups" "$backup"
-for file in config.json domains.json providers.json woo_exceptions.json ip_allowlist.json cloudflare_prefixes.json proxy_trust_state.json state.json; do
+for file in config.json domains.json traffic_detection.json providers.json woo_exceptions.json ip_allowlist.json cloudflare_prefixes.json proxy_trust_state.json state.json; do
   test ! -f "$data_dir/$file" || cp -p "$data_dir/$file" "$backup/$file"
 done
 restore() {
   for file in "$backup"/*.json; do test -e "$file" || continue; cp -p "$file" "$data_dir/$(basename "$file")"; done
+  if test ! -f "$backup/traffic_detection.json"; then
+    rm -f "$data_dir/traffic_detection.json"
+  fi
 }
 trap 'restore' HUP INT TERM
 if ! "$python_bin" - "$data_dir" "$plugin_dir/data/providers.default.json" <<'PY'
@@ -58,10 +61,14 @@ if defaults_path.is_file():
     providers_path.write_text(json.dumps(providers, indent=2, sort_keys=True) + "\n")
     os.chmod(providers_path, 0o600)
 
-for path in sorted(root.glob("*.json")):
+traffic_path = root / "traffic_detection.json"
+paths = sorted(root.glob("*.json"))
+if not traffic_path.exists():
+    paths.append(traffic_path)
+for path in paths:
     if path.name.endswith(".default.json") or path.name.startswith("update-") or path.name in {"update-cache.json"}:
         continue
-    data = json.loads(path.read_text())
+    data = {"schema_version": 1, "domains": {}} if path == traffic_path and not path.exists() else json.loads(path.read_text())
     version = data.get("schema_version")
     if version != 1:
         raise SystemExit(f"unsupported schema in {path.name}: {version}")
