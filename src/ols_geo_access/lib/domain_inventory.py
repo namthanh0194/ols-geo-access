@@ -333,11 +333,13 @@ def _nginx_database(database_path):
     sites = {}
     owners = {}
     for site_id, name, status, root, project_type in rows:
+        normalized_status = int(status) if isinstance(status, str) and status.isdigit() else status
         if (type(site_id) is not int or site_id <= 0 or site_id in sites or not isinstance(name, str)
-                or type(status) is not int or status not in {0, 1} or not isinstance(root, str)
+                or type(normalized_status) is not int or normalized_status not in {0, 1} or not isinstance(root, str)
                 or not Path(root).is_absolute() or "\x00" in root
                 or project_type is not None and not isinstance(project_type, str)):
             raise ValueError("Invalid or ambiguous aaPanel site record")
+        status = normalized_status
         domain = _validate_domain(name)
         if domain in owners:
             raise ValueError("Duplicate aaPanel site name")
