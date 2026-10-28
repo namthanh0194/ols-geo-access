@@ -7,8 +7,8 @@ from urllib.request import urlopen
 
 from lib.domain_inventory import _validate_domain
 
-INTERVAL_SECONDS = 15 * 60
-MAX_GAP_SECONDS = 45 * 60
+INTERVAL_SECONDS = 23 * 60 * 60
+MAX_GAP_SECONDS = 36 * 60 * 60
 
 
 def resolve_addresses(domain):

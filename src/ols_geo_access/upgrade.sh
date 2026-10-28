@@ -94,7 +94,7 @@ mkdir -p "$cron_dir"
 printf '%s\n' \
   '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' \
   '23 */6 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_cloudflare.py --scheduled >> /www/server/panel/plugin/ols_geo_access/logs/cloudflare-update.log 2>&1' \
-  '*/15 * * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
+  '0 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
   > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
 "$python_bin" - "$data_dir/backups" <<'PY'
