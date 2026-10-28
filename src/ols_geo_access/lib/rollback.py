@@ -33,6 +33,15 @@ def _release_manifest(releases_root, release_id):
         raise ValueError("release manifest id mismatch")
     return manifest
 
+def _is_vhost_present(vhost_root, domain):
+    root = Path(vhost_root).resolve()
+    return (
+        (root / "proxy" / domain).is_dir()
+        or (root / f"{domain}.conf").is_file()
+        or (root / "detail" / f"{domain}.conf").is_file()
+    )
+
+
 def _managed_target(vhost_root, domain):
     if not re.fullmatch(
         r"(?=^.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
@@ -258,6 +267,8 @@ def deactivate_managed_release(
                 raise ValueError(f"managed integration path changed: {domain}")
             target = _managed_target(vhost_root, domain)
             if not target.is_file():
+                if not _is_vhost_present(vhost_root, domain):
+                    continue
                 raise RuntimeError(f"managed integration is missing: {domain}")
             content = target.read_bytes()
             if sha256_bytes(content) != metadata.get("sha256"):
@@ -416,7 +427,11 @@ def _apply_release_unlocked(
     current_files = current.get("managed_files", {}) if current else {}
     for domain, metadata in current_files.items():
         target = _managed_target(vhost_root, domain)
-        if not target.is_file() or sha256_bytes(target.read_bytes()) != metadata["sha256"]:
+        if not target.is_file():
+            if not _is_vhost_present(vhost_root, domain):
+                continue
+            raise RuntimeError(f"managed integration checksum changed: {domain}")
+        if sha256_bytes(target.read_bytes()) != metadata["sha256"]:
             raise RuntimeError(f"managed integration checksum changed: {domain}")
     for domain in new_contents:
         target = _managed_target(vhost_root, domain)
