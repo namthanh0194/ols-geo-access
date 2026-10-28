@@ -14,6 +14,7 @@ __pycache__/
 # aaPanel plugin runtime data
 /src/ols_geo_access/data/config.json
 /src/ols_geo_access/data/domains.json
+/src/ols_geo_access/data/traffic_detection.json
 /src/ols_geo_access/data/providers.json
 /src/ols_geo_access/data/woo_exceptions.json
 /src/ols_geo_access/data/ip_allowlist.json

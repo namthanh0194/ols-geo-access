@@ -1,7 +1,9 @@
 import importlib
+import copy
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -16,6 +18,7 @@ import lib.proxy_trust_transaction as proxy_trust_transaction_module
 import lib.rollback as rollback_module
 import lib.service_sources as service_sources_module
 import lib.updater as updater_module
+import lib.traffic_detection as traffic_detection_module
 
 importlib.reload(maxmind_module)
 importlib.reload(bot_activity_module)
@@ -27,7 +30,9 @@ importlib.reload(proxy_trust_transaction_module)
 importlib.reload(rollback_module)
 importlib.reload(service_sources_module)
 importlib.reload(updater_module)
+importlib.reload(traffic_detection_module)
 from lib.updater import PluginUpdater
+from lib.traffic_detection import classify_addresses, local_origin_addresses, observe, resolve_addresses
 
 from lib.baseline_audit import audit_baseline as build_baseline_report
 from lib.baseline_repair import _atomic_write
@@ -102,7 +107,7 @@ from lib.rollback import (
     list_releases as list_managed_releases,
     prune_release_history,
 )
-from lib.transaction import deployment_lock
+from lib.transaction import deployment_lock, process_lock
 
 
 class ols_geo_access_main:
@@ -128,6 +133,8 @@ class ols_geo_access_main:
         cloudflare_downloader=download_cloudflare_ranges,
         country_lookup=None,
         clock=None,
+        traffic_resolver=resolve_addresses,
+        origin_address_loader=local_origin_addresses,
     ):
         self._adapter = adapter or OLSAdapter()
         self._vhost_root = Path(vhost_root)
@@ -136,6 +143,8 @@ class ols_geo_access_main:
         self._paths = PluginPaths(self._plugin_root)
         self._updater = PluginUpdater(plugin_dir=self._plugin_root)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._traffic_resolver = traffic_resolver
+        self._origin_address_loader = origin_address_loader
         self._cloudflare_downloader = cloudflare_downloader
         self._cloudflare_snapshot = None
         self._proxy_trust_state = load_proxy_trust_state(
@@ -396,6 +405,7 @@ class ols_geo_access_main:
         assignments,
         build_overrides=None,
         action_name,
+        expected_domains=None,
     ):
         proposed_bytes = {
             str(self._paths.data_file(name).relative_to(self._paths.root)):
@@ -403,9 +413,13 @@ class ols_geo_access_main:
             for name, payload in state_changes.items()
         }
         with deployment_lock(self._state_root):
+            if expected_domains is not None and load_json(self._paths, "domains") != expected_domains:
+                raise ValueError("Cấu hình website đã thay đổi; bỏ kết quả cũ và thử lại")
             self._assert_proxy_trust(assignments)
             self._assert_proxy_recovery_clear()
             self._recover_before_mutation()
+            if expected_domains is not None and load_json(self._paths, "domains") != expected_domains:
+                raise ValueError("Cấu hình website đã thay đổi sau khôi phục; thử lại")
             current_path = self._state_root / "current.json"
             current = json.loads(current_path.read_text()) if current_path.is_file() else {}
             try:
@@ -1103,6 +1117,7 @@ class ols_geo_access_main:
 
     def get_domains(self, _request):
         settings = load_json(self._paths, "domains")["domains"]
+        observations = self._load_traffic_detection()["domains"]
         managed = {domain for domain, item in settings.items() if item.get("enabled") and item.get("group") != "NONE"}
         records = collect_domains(self._database_path, self._vhost_root, traffic_modes={domain: item["traffic_mode"] for domain, item in settings.items()}, managed_domains=managed)
         result = []
@@ -1110,6 +1125,9 @@ class ols_geo_access_main:
         for record in records:
             item = asdict(record)
             item.update(settings.get(record.domain, {"group": "NONE", "traffic_mode": "unknown", "enabled": False}))
+            item.setdefault("traffic_auto", record.domain not in settings)
+            observation = observations.get(record.domain)
+            item["traffic_detection"] = observation if item["traffic_auto"] and observation and observation.get("assignment") == settings.get(record.domain) else None
             proxy_report = self._proxy_trust_report(
                 record.domain,
                 item["traffic_mode"],
@@ -1120,6 +1138,78 @@ class ols_geo_access_main:
             item["proxy_trust_remediation"] = list(proxy_report.remediation)
             result.append(item)
         return {"status": True, "domains": result}
+
+    def _load_traffic_detection(self):
+        path = self._paths.data_file("traffic_detection")
+        if path.is_symlink():
+            raise ValueError("Traffic detection state must not be a symlink")
+        try:
+            payload = load_json(self._paths, "traffic_detection")
+        except FileNotFoundError:
+            return {"schema_version": 1, "domains": {}}
+        config_store_module.validate_traffic_detection(payload)
+        return payload
+
+    def refresh_traffic_modes(self, _request):
+        try:
+            with process_lock(self._state_root / "traffic-detection.lock"):
+                return self._refresh_traffic_modes()
+        except (OSError, ValueError, RuntimeError) as error:
+            return {"status": False, "msg": str(error)}
+
+    def _refresh_traffic_modes(self):
+        baseline = load_json(self._paths, "domains")
+        previous = self._load_traffic_detection()["domains"]
+        proposed = copy.deepcopy(baseline)
+        observations = {}
+        self._reload_cloudflare_state()
+        prefixes = self._required_proxy_prefixes if not self._proxy_freshness["blocking"] else ()
+        try:
+            origins = self._origin_address_loader()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            origins = ()
+        for domain, assignment in baseline["domains"].items():
+            if not assignment.get("traffic_auto", False):
+                continue
+            try:
+                addresses = self._traffic_resolver(domain)
+                result = classify_addresses(addresses, prefixes, origins)
+            except (OSError, ValueError, TimeoutError) as error:
+                result = {"mode": "unknown", "reason": "Không kiểm tra được DNS: " + str(error)[:200]}
+            old = previous.get(domain)
+            if old and old.get("assignment") != assignment:
+                old = None
+            observation = observe(old, result, self._clock())
+            if observation["status"] == "confirmed":
+                proposed["domains"][domain]["traffic_mode"] = observation["mode"]
+            observation["assignment"] = copy.deepcopy(proposed["domains"][domain])
+            observations[domain] = observation
+        detection = {"schema_version": 1, "domains": observations}
+        if proposed != baseline:
+            try:
+                deployment = self._deploy_state_change(
+                    state_changes={"domains": proposed, "traffic_detection": detection},
+                    assignments=proposed["domains"], action_name="domains.traffic_detect",
+                    expected_domains=baseline,
+                )
+                return {"status": True, "checked": len(observations), "deployment": deployment}
+            except Exception as error:
+                for domain, observation in observations.items():
+                    observation["assignment"] = copy.deepcopy(baseline["domains"][domain])
+                    if proposed["domains"][domain] != baseline["domains"][domain]:
+                        observation["status"] = "blocked"
+                        observation["error"] = str(error)[:400]
+                with deployment_lock(self._state_root):
+                    if load_json(self._paths, "domains") == baseline:
+                        save_json(self._paths, "traffic_detection", detection, audit=self._audit)
+                self._audit.record_action("domains.traffic_detect", {"result": "blocked", "error": str(error)[:400]})
+                return {"status": False, "checked": len(observations), "msg": str(error)}
+        with deployment_lock(self._state_root):
+            if load_json(self._paths, "domains") != baseline:
+                raise ValueError("Cấu hình website đã thay đổi trong lúc kiểm tra DNS; thử lại ở lượt sau")
+            if detection != {"schema_version": 1, "domains": previous}:
+                save_json(self._paths, "traffic_detection", detection, audit=self._audit)
+        return {"status": True, "checked": len(observations)}
 
     def get_bot_activity(self, request):
         period = request.get("period", "24h")
@@ -1358,10 +1448,19 @@ class ols_geo_access_main:
     def save_domains(self, request):
         payload = self._payload(request)
         try:
+            config_store_module.validate_domains(payload)
+            baseline = load_json(self._paths, "domains")
+            payload = copy.deepcopy(payload)
+            for domain, assignment in payload["domains"].items():
+                if assignment.get("traffic_auto", False):
+                    assignment["traffic_mode"] = baseline["domains"].get(domain, {}).get("traffic_mode", "unknown")
+                    if assignment["traffic_mode"] not in {"direct", "cloudflare"} and assignment["enabled"] and assignment["group"] != "NONE":
+                        return {"status": False, "msg": domain + ": hãy lưu Tự động khi chưa bật bảo vệ, đợi nhận diện rồi bật; hoặc chọn luồng thủ công đã xác minh."}
             deployment = self._deploy_state_change(
                 state_changes={"domains": payload},
                 assignments=payload["domains"],
                 action_name="domains.auto_apply",
+                expected_domains=baseline if any(item.get("traffic_auto", False) for item in payload["domains"].values()) else None,
             )
         except ProxyTrustBlocking as error:
             return self._proxy_block_response(error)

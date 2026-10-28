@@ -89,6 +89,17 @@ Nếu lần tải trực tiếp lúc cài đặt thất bại, plugin dùng snap
 - `Cloudflare`: plugin tự quản lý CIDR Trusted Proxy; chỉ chọn khi website thực sự đi qua Cloudflare.
 - `Proxy/CDN khác`: chỉ chọn khi đã xác minh cách proxy truyền IP client.
 
+### Luồng truy cập tự động
+
+- Trong tab **Website**, chọn **Tự động (15 phút)** ở cột Luồng truy cập rồi **Lưu và áp dụng**. Website đã cấu hình giữ lựa chọn thủ công cũ; website chưa cấu hình mặc định chọn Tự động trên UI.
+- Cron kiểm tra DNS A và AAAA mỗi 15 phút, độc lập với lượt truy cập website và việc mở aaPanel. DNS được hỏi qua Google Public DNS HTTPS (mỗi truy vấn timeout 5 giây); máy chủ cần truy cập được `dns.google:443`. Kết quả có thể chậm theo cache/TTL DNS.
+- Chỉ nhận diện **Cloudflare** khi toàn bộ IP DNS thuộc snapshot Cloudflare đã xác minh và còn hạn. Chỉ nhận diện **Trực tiếp** khi toàn bộ IP DNS trùng IP công khai đang gán trên interface máy chủ. Không xem mọi IP ngoài Cloudflare là truy cập trực tiếp.
+- DNS hỗn hợp, CDN khác, lỗi DNS, thiếu dải Cloudflare hoặc origin sau NAT không có IP công khai trên interface: ghi rõ **chưa xác định** và giữ luồng đang áp dụng. Với NAT/CDN khác, dùng lựa chọn thủ công sau khi xác minh.
+- Hai kết quả nhất quán cách nhau ít nhất 15 phút mới xác nhận luồng mới. Mọi lần đổi luồng vẫn qua Trusted Proxy preflight, config-test và transaction/rollback hiện có; không tự nới Trusted Proxy hay sửa policy/chặn index. Khi kiểm tra thất bại, UI hiển thị lý do và giữ cấu hình trước.
+- UI hiển thị **Tự động → Cloudflare**, **Tự động → Trực tiếp**, **Chờ nhận diện**, kết quả DNS đang chờ xác nhận, lỗi chưa áp dụng và thời điểm kiểm tra. Khi tab Website đang mở, UI đọc lại kết quả mỗi phút, không chạy DNS và không ghi đè form chưa lưu.
+- Website mới chưa có luồng được xác minh: lưu Tự động khi chưa bật bảo vệ; đợi nhận diện xong rồi bật bảo vệ. Có thể chọn luồng thủ công đã xác minh nếu không muốn chờ.
+- Trạng thái nhận diện lưu tại `data/traffic_detection.json`; job dùng audit log có rotation hiện có, không tạo thêm file log vô hạn. Gỡ plugin sẽ xóa cron chung như trước.
+
 ## Tab Bot tìm kiếm
 
 Tab này hiển thị:

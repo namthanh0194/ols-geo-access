@@ -5,6 +5,7 @@ class PluginPaths:
     DATA_FILES = {
         "config": "config.json",
         "domains": "domains.json",
+        "traffic_detection": "traffic_detection.json",
         "providers": "providers.json",
         "woo_exceptions": "woo_exceptions.json",
         "ip_allowlist": "ip_allowlist.json",

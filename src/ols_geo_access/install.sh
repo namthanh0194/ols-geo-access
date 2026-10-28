@@ -22,7 +22,7 @@ if test "$source_dir" != "$plugin_dir"; then
 fi
 mkdir -p "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/data/proxy-trust-transactions" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
 chmod 700 "$plugin_dir/data" "$plugin_dir/data/secrets" "$plugin_dir/data/snapshots" "$plugin_dir/data/release-state" "$plugin_dir/data/proxy-trust-transactions" "$plugin_dir/generated" "$plugin_dir/generated/releases" "$plugin_dir/logs" "$plugin_dir/tmp"
-for name in config domains providers woo_exceptions ip_allowlist cloudflare_prefixes proxy_trust_state; do
+for name in config domains providers woo_exceptions ip_allowlist cloudflare_prefixes proxy_trust_state traffic_detection; do
   target="$plugin_dir/data/$name.json"
   test -f "$target" || cp "$source_dir/data/$name.default.json" "$target"
   chmod 600 "$target"
@@ -57,6 +57,7 @@ mkdir -p "$cron_dir"
 printf '%s\n' \
   '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' \
   '23 */6 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_cloudflare.py --scheduled >> /www/server/panel/plugin/ols_geo_access/logs/cloudflare-update.log 2>&1' \
+  '*/15 * * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
   > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
 "$python_bin" "$plugin_dir/update_feeds.py" >> "$plugin_dir/logs/feed-update.log" 2>&1 || true

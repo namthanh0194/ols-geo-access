@@ -34,6 +34,18 @@ def validate_domains(data):
             raise ValueError("enabled must be boolean")
         if "bot_indexing_disabled" in settings and not isinstance(settings["bot_indexing_disabled"], bool):
             raise ValueError("bot indexing disabled must be boolean")
+        if "traffic_auto" in settings and not isinstance(settings["traffic_auto"], bool):
+            raise ValueError("traffic auto must be boolean")
+
+def validate_traffic_detection(data):
+    _require_schema(data)
+    if not isinstance(data.get("domains"), dict):
+        raise ValueError("traffic detection domains must be an object")
+    for observation in data["domains"].values():
+        if not isinstance(observation, dict) or observation.get("mode") not in {"direct", "cloudflare", "unknown"}:
+            raise ValueError("invalid traffic observation")
+        if observation.get("status") not in {"unknown", "pending", "confirmed", "blocked"}:
+            raise ValueError("invalid traffic detection status")
 
 
 def validate_exceptions(data):
@@ -93,6 +105,7 @@ def validate_ip_allowlist(data):
 
 VALIDATORS = {
     "domains": validate_domains,
+    "traffic_detection": validate_traffic_detection,
     "woo_exceptions": validate_exceptions,
     "ip_allowlist": validate_ip_allowlist,
 }

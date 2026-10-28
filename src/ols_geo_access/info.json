@@ -3,11 +3,11 @@
   "name": "ols_geo_access",
   "type": "plugin",
   "ps": "Quản lý truy cập GeoIP và bot tìm kiếm đã xác minh cho từng website OpenLiteSpeed",
-  "versions": "0.2.4",
+  "versions": "0.2.5",
   "checks": "/www/server/panel/plugin/ols_geo_access/ols_geo_access_main.py",
   "author": "Local",
   "home": "",
-  "date": "2026-10-27",
+  "date": "2026-10-28",
   "default": false,
   "display": 1
 }
