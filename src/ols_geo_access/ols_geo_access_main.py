@@ -280,6 +280,7 @@ class ols_geo_access_main:
             "webserver_type": self._webserver_type,
             "detected_webserver_type": environment.get("backend", "unknown"),
             "persisted_webserver_type": persisted,
+            "runtime_diagnostic": {key: environment.get(key) for key in ("confidence", "reason", "master_pid", "is_container")},
             "runtime_verified": verified,
             "diagnostic_only": code is not None,
             "mutation_allowed": code is None,
