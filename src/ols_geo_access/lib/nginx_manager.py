@@ -147,6 +147,47 @@ class NginxManager:
                     'operation_id': pending[0] if len(pending) == 1 else None,
                     'reason': 'Giao dịch Nginx chưa hoàn tất; cần khôi phục trước khi lưu tiếp.' if pending else ''}
 
+    def inspect_protection(self, assignments):
+        result = {'domains': [], 'release_id': None, 'reason': ''}
+        try:
+            state = self.status()
+            if state['blocking']:
+                raise ValueError(state['reason'])
+            current = state['current']
+            if not current or current['status'] != 'active':
+                raise ValueError('Chưa có bản cấu hình Nginx đang áp dụng')
+            context = self._context()
+            with context.lock():
+                if engine._load_json(self.state / 'current.json') != current:
+                    raise ValueError('Bản cấu hình Nginx thay đổi trong lúc xác minh')
+                records, inventory = context.inventory()
+                bodies = engine._candidate(context, current['release_id'], self.releases)
+                owned = {'http': current['http_conf'], **current['managed_snippets']}
+                if set(bodies) != set(owned):
+                    raise ValueError('Danh sách snippet không khớp bản cấu hình Nginx')
+                for key, content in bodies.items():
+                    actual, snapshot = engine._read_file(context.target(key))
+                    if actual != content or snapshot != owned[key]:
+                        raise ValueError('Checksum/quyền sở hữu Nginx không khớp: ' + key)
+                settings = engine._candidate_settings(context, current['release_id'])
+                deployed = json.loads(settings.get('domains.json', b'{}')).get('domains', {})
+                if not self.app._adapter.test_config().valid:
+                    raise ValueError('Kiểm tra cấu hình Nginx không hợp lệ')
+                if not self.probe(current):
+                    raise ValueError('Nginx chưa xác nhận đang nạp bản cấu hình này')
+                context.verify(inventory)
+                result['domains'] = sorted(domain for domain in current['managed_snippets']
+                    if domain in records and records[domain].supported_for_protection
+                    and records[domain].status == 'active' and domain in assignments
+                    and assignments[domain].get('enabled') and assignments[domain].get('group') != 'NONE'
+                    and deployed.get(domain) == assignments[domain])
+                result['release_id'] = current['release_id']
+                if not result['domains']:
+                    result['reason'] = 'Chính sách website chưa khớp bản cấu hình đã áp dụng'
+        except (OSError, ValueError, RuntimeError) as error:
+            result['reason'] = str(error)
+        return result
+
     def _settings(self, changes, overrides):
         payloads, expected = {}, {}
         for name in ('domains', 'config', 'providers', 'woo_exceptions', 'ip_allowlist', 'cloudflare_prefixes'):

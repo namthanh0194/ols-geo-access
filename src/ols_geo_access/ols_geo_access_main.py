@@ -1359,6 +1359,10 @@ class ols_geo_access_main:
         records = self._collect_backend_domains(settings)
         result = []
         server_config_text = self._server_config_text() if self._webserver_type == "openlitespeed" else None
+        verification = {'domains': [], 'release_id': None, 'reason': ''}
+        if self._webserver_type == 'nginx' and any(
+                item.get('enabled') and item.get('group') != 'NONE' for item in settings.values()):
+            verification = self._nginx.inspect_protection(settings)
         for record in records:
             item = asdict(record)
             item.update(settings.get(record.domain, {"group": "NONE", "traffic_mode": "unknown", "enabled": False}))
@@ -1368,6 +1372,14 @@ class ols_geo_access_main:
             item["can_edit"] = backend["mutation_allowed"]
             if self._webserver_type == "nginx":
                 item['can_edit'] = backend['mutation_allowed'] and record.supported_for_protection
+                item['integration_release'] = None
+                item['integration_reason'] = verification['reason'] or (
+                    'Chính sách website chưa khớp bản cấu hình đã áp dụng'
+                    if item.get('enabled') and item.get('group') != 'NONE' else '')
+                if record.domain in verification['domains'] and record.supported_for_protection:
+                    item['integration'] = 'verified'
+                    item['integration_release'] = verification['release_id']
+                    item['integration_reason'] = 'Checksum, quyền quản lý, cấu hình và runtime Nginx đã khớp; chưa thay thế kiểm thử truy cập thực tế.'
                 item["proxy_trust_state"] = 'server-scoped' if record.supported_for_protection else 'not_verified'
                 item["proxy_trust_blocking"] = not record.supported_for_protection
                 item["proxy_trust_remediation"] = [record.unsupported_reason] if record.unsupported_reason else []
