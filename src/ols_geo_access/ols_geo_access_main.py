@@ -1703,13 +1703,39 @@ class ols_geo_access_main:
             config_store_module.validate_domains(payload)
             baseline = load_json(self._paths, "domains")
             payload = copy.deepcopy(payload)
+            state_changes = {"domains": payload}
+            detection = None
             for domain, assignment in payload["domains"].items():
                 if assignment.get("traffic_auto", False):
-                    assignment["traffic_mode"] = baseline["domains"].get(domain, {}).get("traffic_mode", "unknown")
+                    current_mode = baseline["domains"].get(domain, {}).get("traffic_mode", "unknown")
+                    if current_mode not in {"direct", "cloudflare"}:
+                        try:
+                            self._reload_cloudflare_state()
+                            prefixes = self._required_proxy_prefixes if not self._proxy_freshness["blocking"] else ()
+                            try:
+                                origins = self._origin_address_loader()
+                            except (OSError, ValueError, subprocess.SubprocessError):
+                                origins = ()
+                            addresses = self._traffic_resolver(domain)
+                            probe_result = classify_addresses(addresses, prefixes, origins)
+                            if probe_result.get("mode") in {"direct", "cloudflare"}:
+                                current_mode = probe_result["mode"]
+                                if detection is None:
+                                    detection = copy.deepcopy(self._load_traffic_detection())
+                                det_domains = detection.setdefault("domains", {})
+                                obs = observe(det_domains.get(domain), probe_result, self._clock())
+                                obs["status"] = "confirmed"
+                                obs["assignment"] = copy.deepcopy(assignment)
+                                obs["assignment"]["traffic_mode"] = current_mode
+                                det_domains[domain] = obs
+                                state_changes["traffic_detection"] = detection
+                        except Exception:
+                            pass
+                    assignment["traffic_mode"] = current_mode
                     if assignment["traffic_mode"] not in {"direct", "cloudflare"} and assignment["enabled"] and assignment["group"] != "NONE":
                         return {"status": False, "msg": domain + ": hãy lưu Tự động khi chưa bật bảo vệ, đợi nhận diện rồi bật; hoặc chọn luồng thủ công đã xác minh."}
             deployment = self._deploy_state_change(
-                state_changes={"domains": payload},
+                state_changes=state_changes,
                 assignments=payload["domains"],
                 action_name="domains.auto_apply",
                 expected_domains=baseline if any(item.get("traffic_auto", False) for item in payload["domains"].values()) else None,
@@ -1730,7 +1756,7 @@ class ols_geo_access_main:
                 "stage": getattr(error, "deployment_stage", "unknown"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
                 "recovery_required": isinstance(error, (RecoveryRequired, nginx_transactions.NginxRecoveryRequired)),
-                "msg": "Không thể áp dụng rule website.",
+                "msg": f"Không thể áp dụng rule website: {error}" if str(error) else "Không thể áp dụng rule website.",
             }
         return {"status": True, "deployment": deployment}
 

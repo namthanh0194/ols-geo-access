@@ -197,6 +197,14 @@ class NginxManager:
         if any(item['traffic_mode'] == 'cloudflare' for item in active.values()):
             snapshot = validate_cloudflare_snapshot(json.loads(settings['cloudflare_prefixes.json']))
             if snapshot_freshness(snapshot, now=self.app._clock())['blocking']:
+                try:
+                    candidate = prepare_cloudflare_snapshot(self.app._cloudflare_downloader(), previous=snapshot,
+                                                            checked_at=self.app._clock().isoformat())
+                    settings['cloudflare_prefixes.json'] = self.app._json_bytes('cloudflare_prefixes', candidate)
+                    snapshot = candidate
+                except Exception:
+                    pass
+            if snapshot_freshness(snapshot, now=self.app._clock())['blocking']:
                 raise ValueError('Cloudflare IP snapshot is stale; update ranges before applying')
             prefixes = snapshot['prefixes']
         if active:
