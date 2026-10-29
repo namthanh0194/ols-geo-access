@@ -943,7 +943,7 @@ class ols_geo_access_main:
         report = self._proxy_trust_report(domain, traffic_mode)
         return {"status": True, "report": asdict(report)}
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def get_cloudflare_trust_status(self, _request):
         if self._webserver_type == 'nginx':
             self._reload_cloudflare_state()
