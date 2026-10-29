@@ -160,9 +160,8 @@ def detect_webserver_environment(prefix=''):
                     'start_time': start_time, 'is_container': False,
                     'confidence': 'verified', 'reason': 'Verified aaPanel master and HTTP listener',
                 })
-            except FileNotFoundError:
-                if process.exists():
-                    raise
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
         if len(candidates) == 1:
             return candidates[0]
         unknown['reason'] = 'Multiple active aaPanel masters' if candidates else 'No verified active aaPanel master'
