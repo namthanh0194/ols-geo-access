@@ -445,6 +445,66 @@ def _nginx_servers(tree, expected_names):
     return len(servers), next(iter(roots), None)
 
 
+def collect_nginx_access_logs(domains, vhost_root, logs_root, *, config_prefix):
+    vhost_root = _nginx_path(vhost_root)
+    prefix = _nginx_path(config_prefix)
+    logs_root = _nginx_path(logs_root)
+    roots = (vhost_root, _nginx_path(vhost_root.parent / 'rewrite'), prefix)
+    result = {}
+    for domain in sorted(set(domains)):
+        _validate_domain(domain)
+        item = {'paths': [], 'state': 'unavailable', 'issues': []}
+        result[domain] = item
+        try:
+            context = {'roots': roots, 'prefix': prefix, 'stack': set(), 'files': 0, 'bytes': 0,
+                       'snippet': vhost_root / 'extension' / domain / '00-ols-geo-access.conf'}
+            tree = _nginx_load(vhost_root / (domain + '.conf'), context)
+            servers = [children for fields, children in tree if fields == ('server',) and children is not None]
+            if not servers:
+                raise ValueError('Không tìm thấy server block của website')
+            disabled = False
+            def inspect_scope(nodes, server_level=False):
+                nonlocal disabled
+                directives = [(fields, nested) for fields, nested in nodes if fields[0] == 'access_log']
+                if server_level and not directives:
+                    item['issues'].append('Chưa có access_log riêng ở cấp server; log kế thừa chưa được hỗ trợ')
+                supported = []
+                unsupported = []
+                scope_disabled = False
+                for fields, nested in directives:
+                    if len(fields) >= 2 and fields[1] in {'off', '/dev/null'} and nested is None:
+                        scope_disabled = True
+                        continue
+                    if (nested is not None or len(fields) < 2 or
+                            fields[1] != str(logs_root / (domain + '.log')) or
+                            (len(fields) > 2 and fields[2] != 'combined') or
+                            any(value.startswith(('gzip', 'if=')) for value in fields[3:])):
+                        unsupported.append('Chưa hỗ trợ access_log tùy chỉnh: ' + ' '.join(fields[1:]))
+                        continue
+                    supported.append(fields[1])
+                item['paths'].extend(supported)
+                if not supported:
+                    disabled = disabled or scope_disabled
+                    item['issues'].extend(unsupported)
+                for fields, children in nodes:
+                    if children is not None:
+                        inspect_scope(children)
+            for server in servers:
+                inspect_scope(server, server_level=True)
+            item['paths'] = sorted(set(item['paths']))
+            if item['paths']:
+                if disabled:
+                    item['issues'].append('Một số server/location đang tắt access_log')
+                item['state'] = 'partial' if item['issues'] else 'ready'
+            elif item['issues']:
+                item['state'] = 'unsupported'
+            else:
+                item['state'] = 'disabled'
+                item['issues'].append('Website đã tắt access_log')
+        except (OSError, ValueError) as error:
+            item['issues'].append('Không đọc được cấu hình access_log: ' + str(error))
+    return result
+
 def collect_domains_nginx(database_path, vhost_root, traffic_modes=None, managed_domains=None,
                           *, config_prefix=None, include_roots=()):
     vhost_root = _nginx_path(vhost_root)

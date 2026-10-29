@@ -1471,7 +1471,13 @@ class ols_geo_access_main:
                 save_json(self._paths, "traffic_detection", detection, audit=self._audit)
         return {"status": True, "checked": len(observations)}
 
-    @_backend_api()
+    def _activity_log_options(self, domains):
+        if self._webserver_type != 'nginx':
+            return {}
+        return {'log_format': 'nginx', 'log_sources': domain_inventory_module.collect_nginx_access_logs(
+            domains, self._vhost_root, self._logs_root, config_prefix=self._server_config_path.parent)}
+
+    @_backend_api(nginx=True, runtime_only=True)
     def get_bot_activity(self, request):
         period = request.get("period", "24h")
         if period not in {"24h", "7d"}:
@@ -1498,21 +1504,28 @@ class ols_geo_access_main:
             if selected_provider not in snapshots:
                 raise ValueError("invalid activity provider")
             snapshots = {selected_provider: snapshots[selected_provider]}
-        now = datetime.now(timezone.utc)
+        now = self._clock()
+        log_options = self._activity_log_options(domains)
         activity = collect_bot_activity(
             domains=domains,
             snapshots=snapshots,
             logs_root=self._logs_root,
             since=now - timedelta(hours=24 if period == "24h" else 24 * 7),
+            **log_options,
         )
         provider_activity = activity
-        if selected_provider:
+        if selected_provider and activity['scanned_bytes'] < 64 * 1024 * 1024:
             provider_activity = collect_bot_activity(
                 domains=domains,
                 snapshots=all_snapshots,
                 logs_root=self._logs_root,
                 since=now - timedelta(hours=24 if period == "24h" else 24 * 7),
+                max_scan_bytes=64 * 1024 * 1024 - activity['scanned_bytes'],
+                **log_options,
             )
+            activity['scanned_bytes'] += provider_activity['scanned_bytes']
+            activity['scanned_files'] += provider_activity['scanned_files']
+            activity['truncated'] = activity['truncated'] or provider_activity['truncated']
         config = load_json(self._paths, "config")
         providers = load_json(self._paths, "providers")
         activity["provider_status"] = bot_activity_module.summarize_provider_status(
@@ -1532,26 +1545,35 @@ class ols_geo_access_main:
                 manifest_path = self._releases_root / release_id / "manifest.json"
                 if manifest_path.is_file():
                     manifest = json.loads(manifest_path.read_text())
-        classified = bot_activity_module.classify_blocked_events(
-            activity["events"], all_snapshots, manifest, current,
-            intentional_index_blocks={
-                domain for domain, settings in assignments.items()
-                if settings.get("bot_indexing_disabled")
-            },
-        )
+        if self._webserver_type == 'nginx':
+            classified = {'events': activity['events'], 'classification': {
+                'needs_attention': 0, 'expected': 0, 'historical': 0}}
+            for event in classified['events']:
+                if event['status'] == 403:
+                    event.update(block_source='unknown', block_reason='HTTP 403 chưa xác định do Geo Access, website hay WAF')
+                    classified['classification']['needs_attention'] += 1
+        else:
+            classified = bot_activity_module.classify_blocked_events(
+                activity["events"], all_snapshots, manifest, current,
+                intentional_index_blocks={
+                    domain for domain, settings in assignments.items()
+                    if settings.get("bot_indexing_disabled")
+                },
+            )
         activity["events"] = classified["events"]
         activity["classification"] = classified["classification"]
+        activity.pop('provider_events', None)
         activity.update({
             "domains": domains,
             "providers": sorted(snapshots),
             "available_domains": available_domains,
             "available_providers": available_providers,
             "period": period,
-            "deployment_id": current.get("deployment_id"),
+            "deployment_id": current.get("deployment_id") or current.get('transaction_id'),
         })
         return {"status": True, "activity": activity}
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def get_traffic_activity(self, request):
         period = request.get("period", "24h")
         if period not in {"24h", "7d"}:
@@ -1605,19 +1627,14 @@ class ols_geo_access_main:
             country_lookup=self._country_lookup(),
             filters={key: value for key, value in filters.items() if value},
             limit=200,
-        )
-        provider_activity = collect_bot_activity(
-            domains=domains,
-            snapshots=snapshots,
-            logs_root=self._logs_root,
-            since=now - timedelta(hours=24 if period == "24h" else 24 * 7),
+            **self._activity_log_options(domains),
         )
         config = load_json(self._paths, "config")
         providers = load_json(self._paths, "providers")
         activity["provider_status"] = bot_activity_module.summarize_provider_status(
             enabled_feeds(providers),
             snapshots,
-            provider_activity["events"],
+            sorted(activity.pop('provider_events', []), key=lambda event: event['timestamp'], reverse=True),
             config.get("feed_max_age_hours", 72),
             now=now,
         )
@@ -1637,7 +1654,10 @@ class ols_geo_access_main:
                 "outcome": selected_outcome,
                 "decision": selected_decision,
             },
-            "deployment_id": current.get("deployment_id"),
+            "deployment_id": current.get("deployment_id") or current.get('transaction_id'),
+            "release_id": current.get('release_id'),
+            "applied_at": current.get('applied_at'),
+            "comparison_only": True,
             "geoip": {
                 "state": "ready" if self._country_lookup() is not None else "missing",
                 "path": str(self._geoip_database),
@@ -1645,11 +1665,50 @@ class ols_geo_access_main:
         })
         return {"status": True, "activity": activity}
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def get_access_policy_status(self, request):
         period = request.get("period", "24h")
         traffic_report = self.get_traffic_activity({"period": period})
+        if not traffic_report.get('status'):
+            return traffic_report
         assignments = load_json(self._paths, "domains")["domains"]
+        if self._webserver_type == 'nginx':
+            verification = self._nginx.inspect_protection(assignments)
+            activity = traffic_report['activity']
+            diagnostics = {item['domain']: item for item in activity['log_status']}
+            try:
+                applied_at = datetime.fromisoformat(activity['applied_at'].replace('Z', '+00:00'))
+                if applied_at.tzinfo is None:
+                    raise ValueError('Missing timezone')
+            except (AttributeError, KeyError, TypeError, ValueError):
+                applied_at = None
+            items = []
+            for domain, assignment in sorted(assignments.items()):
+                if not assignment.get('enabled') or assignment.get('group') == 'NONE':
+                    continue
+                verified = domain in verification['domains'] and verification.get('release_id') == activity.get('release_id')
+                events = [event for event in activity['events'] if event['domain'] == domain and applied_at
+                          and datetime.fromisoformat(event['timestamp']) >= applied_at]
+                summary = bot_activity_module._traffic_summary(events)
+                issues = list(diagnostics.get(domain, {}).get('issues', []))
+                if not verified:
+                    issues.insert(0, verification.get('reason') or 'Website chưa khớp cấu hình Nginx đang nạp')
+                if not events:
+                    issues.append('Chưa có mẫu request sau lần áp dụng hiện tại; chưa đủ dữ liệu đối soát')
+                if summary['unexpected_block'] or summary['unexpected_allow']:
+                    issues.append('Có HTTP khác dự kiến; cần kiểm tra ngoại lệ, website/WAF và luồng IP thật')
+                if activity['geoip']['state'] != 'ready':
+                    issues.append('Thiếu database GeoIP để nhận diện quốc gia')
+                if not summary['vietnam_allowed'] or not summary['foreign_blocked']:
+                    issues.append('Chưa đủ mẫu Việt Nam và quốc tế để đánh giá chính sách')
+                items.append({'domain': domain, 'policy': assignment.get('group'),
+                    'traffic_mode': assignment.get('traffic_mode'),
+                    'proxy_trust_state': ('trusted' if assignment.get('traffic_mode') == 'cloudflare' else 'not_required') if verified else 'not_verified',
+                    'config_verified': verified, 'release_id': verification.get('release_id'),
+                    'status': 'blocking' if not verified else 'warning' if issues else 'ready',
+                    'issues': issues, 'evidence': summary})
+            return {'status': True, 'policy': {'period': period, 'geoip': activity['geoip'],
+                    'domains': items, 'summary': activity['summary'], 'comparison_only': True}}
         current_path = self._state_root / "current.json"
         current = {}
         manifest = None

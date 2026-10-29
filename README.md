@@ -1,10 +1,10 @@
 # OLS Geo Access
 
-Plugin aaPanel cho OpenLiteSpeed giúp áp dụng chính sách truy cập theo quốc gia trên từng website, đồng thời cho phép các bot đã được xác minh bằng IP chính thức tiếp tục truy cập an toàn.
+Plugin aaPanel cho OpenLiteSpeed và Nginx giúp áp dụng chính sách truy cập theo quốc gia trên từng website, đồng thời cho phép các bot đã được xác minh bằng IP chính thức tiếp tục truy cập an toàn.
 
 > Plugin là third-party plugin. Không sửa file core aaPanel trong `class/` hoặc `class_v2/`.
 
-## Đang phát triển — bảo vệ Nginx (chưa phát hành)
+## Bảo vệ Nginx — từ v0.3.0
 
 - Nginx có đường lưu/áp dụng policy, staging, rollback và khôi phục giao dịch riêng; không dùng cơ chế cấu hình OpenLiteSpeed. Tệp JSON và snapshot thay đổi cùng cấu hình trong giao dịch có backup/checksum.
 - Chỉ mở thao tác khi xác minh đúng runtime, module RealIP, module GeoIP2 đã nạp, MMDB hợp lệ và HTTP include phù hợp. Mỗi website phải có extension include ở vị trí an toàn; không tự sửa vhost không đủ điều kiện.
@@ -13,11 +13,19 @@ Plugin aaPanel cho OpenLiteSpeed giúp áp dụng chính sách truy cập theo q
 - Cài/nâng cấp chuẩn bị plugin, cron và điều kiện GeoIP2, không tự bật rule. Nếu module đã được nạp thì dùng lại, không build/reload; nếu thiếu, tự biên dịch module từ source có checksum đã ghim, đối chiếu ABI với binary đang chạy, sao lưu cấu hình rồi kiểm tra/reload có xác minh. Không thay binary hoặc nâng cấp Nginx. Cron bỏ qua backend chưa sẵn sàng/chưa kích hoạt. Domain chọn **Tự động** được kiểm tra lúc **03:00 hằng ngày theo giờ máy chủ**, không truy vấn DNS trên từng request.
 - CIDR Cloudflare không đổi: cập nhật metadata trong giao dịch, không reload. Uninstall chỉ gỡ artifact do plugin sở hữu, kiểm tra cấu hình và xác minh worker trước khi xóa mã nguồn.
 - Tự biên dịch hiện hỗ trợ **Nginx 1.28.3 trên Debian/Ubuntu**; installer chỉ cài thêm dependency build bằng apt khi thiếu, chạy mô phỏng và từ chối nếu cần nâng cấp/gỡ package đang có. Phiên bản chưa có checksum đã ghim bị từ chối, không thử nạp module đoán tương thích. Gói nguồn, archive apt riêng và thư mục build tự xóa sau thành công hoặc lỗi; giữ tối đa 5 backup/giao dịch đã hoàn tất, không xóa giao dịch cần khôi phục.
-- Database GeoLite2-Country hợp lệ có sẵn được dùng lại. Nếu thiếu và đã có credentials, installer tự tải từ MaxMind; nếu chưa có, nhập Account ID/License Key một lần trong UI. Thiết lập GeoIP không yêu cầu bật rule trước. Bản này từ chối thay database khi đang có release bảo vệ Nginx, để không làm lệch dữ liệu của runtime; thống kê crawler chi tiết vẫn chỉ hỗ trợ OpenLiteSpeed.
+- Database GeoLite2-Country hợp lệ có sẵn được dùng lại. Nếu thiếu và đã có credentials, installer tự tải từ MaxMind; nếu chưa có, nhập Account ID/License Key một lần trong UI. Thiết lập GeoIP không yêu cầu bật rule trước. Bản này từ chối thay database khi đang có release bảo vệ Nginx, để không làm lệch dữ liệu của runtime.
 - Dashboard phân biệt “Chưa kiểm tra” với “Chưa có”; lỗi xác minh hiển thị mã lỗi và lý do từ bộ nhận diện, không kết luận thiếu GeoIP khi chưa kiểm tra runtime.
 - Installer khởi tạo feed crawler đang bật theo đường snapshot-only, không triển khai rule hoặc đổi phân nhóm domain. Nếu nguồn feed lỗi, dashboard giữ trạng thái chờ; cron feed tiếp tục thử khi chưa kích hoạt Nginx, tránh vòng lặp “chưa có feed nên không bật được, chưa bật nên không tải feed”. Khi có bảo vệ đang chạy, vẫn dùng cập nhật có giao dịch như trước.
 
-Đây là source đang phát triển; tag `v0.2.9` đã phát hành vẫn chỉ hỗ trợ chẩn đoán Nginx. Chưa tăng version hoặc triển khai production.
+Tag `v0.2.9` chỉ hỗ trợ chẩn đoán Nginx; từ `v0.3.0` có cơ chế bảo vệ Nginx nêu trên. Việc phát hành mã nguồn không tự cập nhật production; người quản trị chủ động cập nhật qua giao diện plugin.
+
+### Nhật ký truy cập Nginx — v0.3.4
+
+- Tab **Nhật ký truy cập** dùng chung cho Nginx và OpenLiteSpeed. Trên Nginx, API chỉ đọc yêu cầu runtime đã xác minh; vẫn xem được log khi điều kiện bật bảo vệ/GeoIP chưa đầy đủ.
+- Đọc log Nginx dạng `combined`, với `access_log /www/wwwlogs/<domain>.log;` hoặc khai báo rõ `combined` trong vhost/include của website. Không tự bật log hoặc thay cấu hình Nginx. Đường dẫn tùy chỉnh, log dùng chung/kế thừa, định dạng tùy chỉnh và log bị tắt đều được báo rõ; không diễn giải thành website an toàn.
+- Hỗ trợ IPv4/IPv6 và file xoay vòng chưa nén (`.1`, `.2026-10-29`, `-20261029`). Không đọc log nén, error log, symlink hoặc file đặc biệt. Mỗi lần tải quét tối đa 64 MiB, hiển thị tối đa 200 request của các website đang bật bảo vệ; số liệu là mẫu, không phải tổng lưu lượng.
+- Bộ lọc hỗ trợ 24 giờ/7 ngày, website, nguồn IP, quốc gia, HTTP và đối chiếu dự kiến. Quốc gia chưa xác định không bị xem là nước ngoài; bot được nhận diện bằng IP feed, không dựa riêng User-Agent. Thông tin hoạt động crawler lấy từ cùng mẫu đã quét, không quét thêm một lượt log cho bảng feed.
+- Đối soát Nginx dùng xác minh release/checksum/runtime hiện có, chỉ lấy request sau lần áp dụng hiện tại làm bằng chứng. Thiếu log, thiếu mẫu VN/quốc tế hoặc cấu hình chưa xác minh được hiển thị riêng. HTTP 403 không chứng minh plugin đã chặn: website/WAF có thể trả cùng mã; GeoIP/feed hiện tại cũng không chứng minh quyết định lịch sử. IP từ `$remote_addr` phụ thuộc cấu hình Trusted Proxy/RealIP đúng.
 
 ## Phiên bản 0.2.9 — Nginx chẩn đoán
 

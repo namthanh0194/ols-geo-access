@@ -1,6 +1,8 @@
 import ipaddress
 import math
+import os
 import re
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +12,11 @@ from lib.service_sources import MANAGED_SERVICE_IDS
 LOG_PATTERN = re.compile(
     r"^'?(?P<forwarded>\S+) (?P<remote>\S+) \S+ \S+ \[(?P<timestamp>[^\]]+)\] "
     r'"(?P<method>[A-Z]+) (?P<path>\S+) [^"]+" (?P<status>\d{3}) .* "(?P<user_agent>[^"]*)"\'?$'
+)
+NGINX_LOG_PATTERN = re.compile(
+    r'^(?P<remote>\S+) \S+ \S+ \[(?P<timestamp>[^\]]+)\] '
+    r'"(?P<method>[A-Z]+) (?P<path>\S+) HTTP/[^" ]+" (?P<status>\d{3}) (?:\d+|-) '
+    r'"(?:[^"\\]|\\.)*" "(?P<user_agent>(?:[^"\\]|\\.)*)"$'
 )
 USER_AGENT_HINTS = (
     "bingbot",
@@ -62,10 +69,13 @@ class _ReverseLineReader:
         self.truncated = False
 
     def __iter__(self):
-        size = self.path.stat().st_size
-        position = size
         pending = b""
-        with self.path.open("rb") as handle:
+        descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as handle:
+            metadata = os.fstat(handle.fileno())
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError('Access log is not a regular file')
+            position = metadata.st_size
             while position > 0 and self.scanned_bytes < self.max_bytes:
                 read_size = min(
                     self.block_size,
@@ -423,6 +433,8 @@ def collect_bot_activity(
     since,
     limit=200,
     max_scan_bytes=64 * 1024 * 1024,
+    log_format='openlitespeed',
+    log_sources=None,
 ):
     activity = collect_traffic_activity(
         domains=domains,
@@ -434,6 +446,8 @@ def collect_bot_activity(
         filters={"source": "bot"},
         limit=limit,
         max_scan_bytes=max_scan_bytes,
+        log_format=log_format,
+        log_sources=log_sources,
     )
     activity["summary"] = {
         key: activity["summary"][key]
@@ -452,7 +466,11 @@ def collect_traffic_activity(
     filters=None,
     limit=500,
     max_scan_bytes=64 * 1024 * 1024,
+    log_format='openlitespeed',
+    log_sources=None,
 ):
+    if log_format not in {'openlitespeed', 'nginx'}:
+        raise ValueError('invalid activity log format')
     if not isinstance(limit, int) or not 1 <= limit <= 500:
         raise ValueError("invalid activity limit")
     if not isinstance(max_scan_bytes, int) or max_scan_bytes < 1:
@@ -470,14 +488,19 @@ def collect_traffic_activity(
     bot_networks = _networks(snapshots)
     trusted_networks = _allowlist_networks(allowlist)
     events = []
+    provider_events = []
+    log_status = []
     root = Path(logs_root).resolve()
-    if not root.is_dir() or not domain_names:
+    if not domain_names:
         return {
             "events": [],
             "summary": _traffic_summary([]),
             "scanned_bytes": 0,
             "scanned_files": 0,
             "truncated": False,
+            "provider_events": [],
+            "log_status": [{'domain': domain, 'state': 'missing', 'issues': ['Thư mục log không tồn tại'], 'paths': []}
+                           for domain in domain_names],
         }
     per_domain_limit = max(1, math.ceil(limit / len(domain_names)))
     per_domain_bytes = max(1, max_scan_bytes // len(domain_names))
@@ -486,23 +509,51 @@ def collect_traffic_activity(
     truncated = False
     for domain in domain_names:
         candidates = []
-        for path in root.glob(f"{domain}_ols.access_log*"):
+        source = (log_sources or {}).get(domain, {}) if log_format == 'nginx' else {
+            'paths': [str(root / (domain + '_ols.access_log'))], 'state': 'ready', 'issues': []}
+        diagnostic = {'domain': domain, 'state': source.get('state', 'unavailable'),
+                      'paths': list(source.get('paths', [])), 'issues': list(source.get('issues', []))}
+        log_status.append(diagnostic)
+        if diagnostic['state'] not in {'ready', 'partial'}:
+            continue
+        paths = []
+        for base in diagnostic['paths']:
+            base = Path(base)
+            if base.parent != root:
+                diagnostic['issues'].append('Đường dẫn log nằm ngoài thư mục được phép')
+                continue
+            for candidate_index, path in enumerate(root.glob(base.name + '*')):
+                if candidate_index >= 512:
+                    truncated = True
+                    diagnostic['issues'].append('Quá nhiều file log xoay vòng; chỉ xét 512 file')
+                    break
+                if log_format == 'nginx' and not re.fullmatch(
+                        re.escape(base.name) + r'(?:\.\d+|\.\d{4}-\d{2}-\d{2}|-\d{8}(?:-\d+)?)?', path.name):
+                    continue
+                paths.append(path)
+        found_files = 0
+        for path in paths:
             try:
                 resolved = path.resolve()
                 resolved.relative_to(root)
-                stat = path.stat()
+                metadata = path.lstat()
+                if any(part.is_symlink() for part in (path, *path.parents)) or not stat.S_ISREG(metadata.st_mode):
+                    diagnostic['issues'].append('Bỏ qua log không phải file thường hoặc symlink: ' + path.name)
+                    continue
             except (OSError, ValueError):
+                diagnostic['issues'].append('Không truy cập được file log: ' + path.name)
                 continue
-            if (
-                path.is_file()
-                and not path.is_symlink()
-                and path.suffix != ".gz"
-                and stat.st_mtime >= since.timestamp()
-            ):
-                candidates.append((stat.st_mtime, resolved))
+            if path.suffix != '.gz':
+                found_files += 1
+                if metadata.st_mtime >= since.timestamp():
+                    candidates.append((metadata.st_mtime, resolved))
         candidates.sort(key=lambda item: (item[0], str(item[1])), reverse=True)
         domain_bytes = 0
         domain_events = 0
+        parsed_lines = 0
+        unparsed_lines = 0
+        scan_limited = False
+        domain_provider_events = 0
         for candidate_index, (_mtime, path) in enumerate(candidates):
             remaining = min(
                 per_domain_bytes - domain_bytes,
@@ -510,47 +561,69 @@ def collect_traffic_activity(
             )
             if remaining <= 0:
                 truncated = True
+                scan_limited = True
                 break
-            reader = _iter_lines_reverse(path, max_bytes=remaining)
-            scanned_files += 1
-            for line in reader:
-                match = LOG_PATTERN.match(line.strip())
-                if not match:
-                    continue
-                try:
-                    timestamp = datetime.strptime(
-                        match["timestamp"], "%d/%b/%Y:%H:%M:%S %z"
-                    )
-                except ValueError:
-                    continue
-                if timestamp < since:
-                    continue
-                status = int(match["status"])
-                event = _classify_traffic_event({
-                    "domain": domain,
-                    "ip": match["remote"],
-                    "timestamp": timestamp.isoformat(),
-                    "method": match["method"],
-                    "path": match["path"],
-                    "status": status,
-                    "outcome": _outcome(status),
-                }, bot_networks, trusted_networks, country_lookup)
-                if not _matches_filters(event, filters):
-                    continue
-                events.append(event)
-                domain_events += 1
-                if domain_events >= per_domain_limit:
-                    reader.truncated = True
-                    break
+            reader = None
+            try:
+                reader = _iter_lines_reverse(path, max_bytes=remaining)
+                scanned_files += 1
+                lines = iter(reader)
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    match = (NGINX_LOG_PATTERN if log_format == 'nginx' else LOG_PATTERN).match(line.strip())
+                    if not match:
+                        unparsed_lines += 1
+                        continue
+                    try:
+                        timestamp = datetime.strptime(match['timestamp'], '%d/%b/%Y:%H:%M:%S %z')
+                        ipaddress.ip_address(match['remote'])
+                    except ValueError:
+                        unparsed_lines += 1
+                        continue
+                    parsed_lines += 1
+                    if timestamp < since:
+                        continue
+                    status = int(match['status'])
+                    event = _classify_traffic_event({
+                        'domain': domain, 'ip': match['remote'], 'timestamp': timestamp.isoformat(),
+                        'method': match['method'], 'path': match['path'], 'status': status,
+                        'outcome': _outcome(status),
+                    }, bot_networks, trusted_networks, country_lookup)
+                    if event['provider'] and domain_provider_events < per_domain_limit:
+                        provider_events.append(event)
+                        domain_provider_events += 1
+                    if not _matches_filters(event, filters):
+                        continue
+                    events.append(event)
+                    domain_events += 1
+                    if domain_events >= per_domain_limit:
+                        reader.truncated = True
+                        break
+            except (OSError, ValueError) as error:
+                diagnostic['issues'].append('Không đọc được log: ' + str(error))
+            if reader is None:
+                continue
             scanned_bytes += reader.scanned_bytes
             domain_bytes += reader.scanned_bytes
             truncated = truncated or reader.truncated
+            scan_limited = scan_limited or reader.truncated
             if domain_events >= per_domain_limit or domain_bytes >= per_domain_bytes:
                 truncated = truncated or bool(candidates[candidate_index + 1:])
                 break
+        if parsed_lines and unparsed_lines:
+            diagnostic['issues'].append(str(unparsed_lines) + ' dòng log không đúng định dạng đã bị bỏ qua')
+        if diagnostic['issues']:
+            diagnostic['state'] = 'partial' if parsed_lines else 'unavailable'
+        elif not found_files:
+            diagnostic.update(state='missing', issues=['Chưa tìm thấy access log của website'])
+        elif not candidates:
+            diagnostic.update(state='no_recent', issues=['Không có file log cập nhật trong khoảng thời gian đã chọn'])
+        elif not parsed_lines:
+            diagnostic.update(state='limited' if scan_limited else 'unrecognized' if domain_bytes else 'empty',
+                              issues=['Đã chạm giới hạn quét' if scan_limited else 'Log rỗng hoặc chưa có dòng đúng định dạng được hỗ trợ'])
         if scanned_bytes >= max_scan_bytes:
             truncated = True
-            break
     events.sort(key=lambda item: item["timestamp"], reverse=True)
     if len(events) > limit:
         truncated = True
@@ -561,4 +634,6 @@ def collect_traffic_activity(
         "scanned_bytes": scanned_bytes,
         "scanned_files": scanned_files,
         "truncated": truncated,
+        "provider_events": provider_events[:limit],
+        "log_status": log_status,
     }

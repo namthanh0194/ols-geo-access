@@ -3,7 +3,7 @@
   "name": "ols_geo_access",
   "type": "plugin",
   "ps": "Quản lý truy cập GeoIP cho OpenLiteSpeed & Nginx",
-  "versions": "0.3.3",
+  "versions": "0.3.4",
   "checks": "/www/server/panel/plugin/ols_geo_access/ols_geo_access_main.py",
   "author": "Local",
   "home": "",
