@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 from lib.audit_log import AuditLogger
 from lib.ols_adapter import OLSAdapter
 from lib.rollback import deactivate_managed_release
-from backend_lifecycle import require_diagnostic_nginx
+from backend_lifecycle import nginx_app
 from lib.backend_detector import load_persisted_backend
 from lib.paths import PluginPaths
 
@@ -24,8 +24,9 @@ def main():
     if not plugin_root.is_dir() or plugin_root.is_symlink():
         raise ValueError("plugin directory is unavailable")
     if load_persisted_backend(PluginPaths(plugin_root)) == 'nginx':
-        require_diagnostic_nginx(plugin_root)
-        print(json.dumps({'status': True, 'diagnostic_only': True, 'webserver_type': 'nginx'}))
+        app = nginx_app(plugin_root, prefix_text)
+        result = app._nginx.deactivate()
+        print(json.dumps({'status': True, 'deployment': result, 'webserver_type': 'nginx'}))
         return 0
     adapter = OLSAdapter()
     adapter.CONFIG_TEST_COMMAND = (

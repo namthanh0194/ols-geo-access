@@ -40,7 +40,14 @@ importlib.reload(traffic_detection_module)
 importlib.reload(domain_inventory_module)
 importlib.reload(backend_detector_module)
 importlib.reload(nginx_adapter_module)
+from lib import nginx_rollback as nginx_transactions
+importlib.reload(nginx_transactions)
+from lib import nginx_manager as nginx_manager_module
+importlib.reload(nginx_manager_module)
 from lib.updater import PluginUpdater
+from lib.nginx_manager import NginxManager
+from lib import nginx_prerequisites
+importlib.reload(nginx_prerequisites)
 from lib.traffic_detection import classify_addresses, local_origin_addresses, observe, resolve_addresses
 
 from lib.baseline_audit import audit_baseline as build_baseline_report
@@ -121,13 +128,16 @@ from lib.rollback import (
 from lib.transaction import deployment_lock, process_lock
 
 
-def _backend_api(ols_only=True):
+def _backend_api(ols_only=True, nginx=False, runtime_only=False):
     def decorate(method):
         @wraps(method)
         def dispatch(self, *args, **kwargs):
             backend = self._backend_status()
-            if ols_only and not backend["mutation_allowed"]:
+            if ols_only and not backend["mutation_allowed"] and not (nginx and runtime_only and backend['runtime_verified']):
                 return self._backend_refusal(backend)
+            if ols_only and self._webserver_type == 'nginx' and not nginx:
+                return {'status': False, 'code': 'nginx_endpoint_unavailable', 'msg': 'Thao tác này chỉ dành cho OpenLiteSpeed.',
+                        'webserver_type': 'nginx', 'backend': backend}
             try:
                 response = method(self, *args, **kwargs)
             except (OSError, ValueError) as error:
@@ -243,6 +253,7 @@ class ols_geo_access_main:
         self._country_lookup_override = country_lookup
         self._cached_country_lookup = None
         self._cached_geoip_signature = None
+        self._nginx = NginxManager(self) if nginx else None
 
     def _backend_status(self):
         environment = {}
@@ -274,8 +285,11 @@ class ols_geo_access_main:
             code, reason = "backend_identity_error", str(error)
         verified = code is None
         if verified and self._webserver_type == "nginx":
-            code = "nginx_diagnostic_only"
-            reason = "Nginx hiện chỉ chẩn đoán: cơ chế triển khai/khôi phục và lifecycle chưa đủ điều kiện an toàn. Chưa cho phép lưu hoặc áp dụng rule."
+            manager = getattr(self, '_nginx', None)
+            missing = manager.requirements() if manager is not None else ['Backend đang khởi tạo']
+            if missing:
+                code = 'nginx_diagnostic_only'
+                reason = 'Chưa thể áp dụng Nginx: ' + '; '.join(missing)
         return {
             "webserver_type": self._webserver_type,
             "detected_webserver_type": environment.get("backend", "unknown"),
@@ -294,7 +308,7 @@ class ols_geo_access_main:
 
     def _require_ols_backend(self):
         backend = self._backend_status()
-        if not backend["mutation_allowed"]:
+        if self._webserver_type != 'openlitespeed' or not backend["mutation_allowed"]:
             raise RuntimeError(backend["reason"])
 
     def _collect_backend_domains(self, settings):
@@ -341,7 +355,7 @@ class ols_geo_access_main:
             self._proxy_prefix_error = str(error)
             return
         freshness = snapshot_freshness(
-            {"checked_at": state.get("last_success_at")},
+            snapshot if self._webserver_type == 'nginx' else {"checked_at": state.get("last_success_at")},
             now=self._clock(),
         )
         self._cloudflare_snapshot = snapshot
@@ -528,6 +542,12 @@ class ols_geo_access_main:
         action_name,
         expected_domains=None,
     ):
+        if self._webserver_type == 'nginx':
+            backend = self._backend_status()
+            if not backend['mutation_allowed']:
+                raise RuntimeError(backend['reason'])
+            return self._nginx.deploy(state_changes=state_changes, assignments=assignments, build_overrides=build_overrides,
+                action_name=action_name, expected_domains=expected_domains)
         self._require_ols_backend()
         proposed_bytes = {
             str(self._paths.data_file(name).relative_to(self._paths.root)):
@@ -666,8 +686,10 @@ class ols_geo_access_main:
             action_name=action_name,
         )
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def apply_scheduled_updates(self, snapshot_candidates, allowlist_candidate=None):
+        if self._webserver_type == 'nginx':
+            return self._nginx.scheduled(snapshot_candidates, allowlist_candidate)
         if not isinstance(snapshot_candidates, dict):
             raise ValueError("snapshot candidates must be an object")
         try:
@@ -845,7 +867,7 @@ class ols_geo_access_main:
                 "updated": [],
                 "service_updated": False,
                 "deployment": None,
-                "recovery_required": isinstance(error, RecoveryRequired),
+                "recovery_required": isinstance(error, (RecoveryRequired, nginx_transactions.NginxRecoveryRequired)),
             }
 
     @staticmethod
@@ -923,6 +945,26 @@ class ols_geo_access_main:
 
     @_backend_api()
     def get_cloudflare_trust_status(self, _request):
+        if self._webserver_type == 'nginx':
+            self._reload_cloudflare_state()
+            snapshot = self._cloudflare_snapshot or {'etag': None, 'counts': {'ipv4': 0, 'ipv6': 0}, 'prefixes': []}
+            return {
+                'status': True,
+                'cloudflare': {
+                    'freshness': self._proxy_freshness['state'],
+                    'last_checked_at': snapshot.get('checked_at'),
+                    'last_success_at': snapshot.get('checked_at'),
+                    'etag': snapshot.get('etag'),
+                    'ipv4_count': snapshot.get('counts', {}).get('ipv4', 0),
+                    'ipv6_count': snapshot.get('counts', {}).get('ipv6', 0),
+                    'configured_count': len(snapshot.get('prefixes', ())),
+                    'missing_prefixes': [],
+                    'stale_prefixes': [],
+                    'header_state': 'trusted_only',
+                    'recovery_required': False,
+                    'last_error_code': None,
+                },
+            }
         self._reload_cloudflare_state()
         snapshot = self._cloudflare_snapshot or {
             "etag": None,
@@ -999,8 +1041,10 @@ class ols_geo_access_main:
             },
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def repair_cloudflare_trust(self, _request):
+        if self._webserver_type == 'nginx':
+            return self._nginx.refresh_cloudflare()
         self._reload_cloudflare_state()
         recovery = inspect_proxy_trust_recovery(
             self._plugin_root,
@@ -1048,6 +1092,11 @@ class ols_geo_access_main:
         }
 
     def _build_staging(self, assignments, payload=None, build_overrides=None):
+        if self._webserver_type == 'nginx':
+            if not self._backend_status()['mutation_allowed']:
+                raise RuntimeError(self._backend_status()['reason'])
+            release_id, expected = self._nginx.build(assignments, overrides=build_overrides)
+            return {'release_id': release_id, 'backend': 'nginx'}
         self._require_ols_backend()
         payload = payload or {}
         build_overrides = build_overrides or {}
@@ -1085,7 +1134,7 @@ class ols_geo_access_main:
             audit=self._audit,
         )
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def build_staging(self, request):
         payload = self._payload(request) if request else {}
         assignments = load_json(self._paths, "domains")["domains"]
@@ -1149,6 +1198,11 @@ class ols_geo_access_main:
         )
 
     def _install_maxmind_candidate(self, candidate):
+        if self._webserver_type == 'nginx':
+            if not self._backend_status()['runtime_verified']:
+                raise ValueError('Nginx runtime is not verified')
+            return nginx_prerequisites.install_database(
+                self._plugin_root, self._adapter, self._geoip_database, candidate)
         self._require_ols_backend()
         return install_country_database(
             candidate,
@@ -1161,22 +1215,32 @@ class ols_geo_access_main:
             audit=self._audit,
         )
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def apply_release(self, request):
+        if self._webserver_type == 'nginx':
+            return {'status': True, 'deployment': self._nginx.apply_staged(request.get('release_id', ''))}
         deployment = self._deploy_existing_release(
             request["release_id"], "release.manual_apply"
         )
         return {"status": True, "deployment": deployment}
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def list_releases(self, _request):
+        if self._webserver_type == 'nginx':
+            return {'status': True, 'releases': nginx_transactions.list_nginx_releases(self._releases_root)}
         return {
             "status": True,
             "releases": list_managed_releases(self._releases_root, self._state_root),
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def get_deployment_recovery_status(self, _request):
+        if self._webserver_type == 'nginx':
+            try:
+                recovery = self._nginx.status()
+            except (OSError, ValueError, RuntimeError) as error:
+                recovery = {'status': 'recovery_required', 'blocking': True, 'safe_action': 'manual', 'reason': str(error)}
+            return {'status': True, 'recovery': recovery, 'proxy_trust_recovery': {'status': 'not_applicable'}}
         return {
             "status": True,
             "recovery": inspect_interrupted_release(
@@ -1191,8 +1255,13 @@ class ols_geo_access_main:
             ),
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def recover_deployment(self, _request):
+        if self._webserver_type == 'nginx':
+            try:
+                return {'status': True, 'recovery': self._nginx.recover()}
+            except (OSError, ValueError, RuntimeError) as error:
+                return {'status': False, 'recovery_required': True, 'msg': str(error)}
         try:
             recovery = recover_interrupted_release(
                 self._plugin_root,
@@ -1211,8 +1280,10 @@ class ols_geo_access_main:
             }
         return {"status": True, "recovery": recovery}
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def rollback_release(self, request):
+        if self._webserver_type == 'nginx':
+            return {'status': True, 'deployment': self._nginx.rollback()}
         current_path = self._state_root / "current.json"
         if not current_path.is_file():
             raise ValueError("no current release")
@@ -1231,7 +1302,7 @@ class ols_geo_access_main:
                 "service": {"pid": None},
                 "config_test": {"valid": None, "exit_code": None, "errors": 0, "warnings": 0,
                                 "error_lines": [], "warning_lines": [backend["reason"]], "skipped": True},
-                "geoip": {"path": str(self._geoip_database), "readable": False},
+                "geoip": {"path": str(self._geoip_database), "checked": False, "readable": None},
                 "domains": {"total": None, "protected": None, "active": None},
                 "feeds": {}, "release": {"current": None, "previous": None}, "capabilities": {},
             }}
@@ -1255,7 +1326,12 @@ class ols_geo_access_main:
             for path in sorted(self._snapshots_root.glob("*.json")):
                 feeds[path.stem] = json.loads(path.read_text())
         current_path = self._state_root / "current.json"
-        current = json.loads(current_path.read_text()) if not nginx and current_path.is_file() else {}
+        current = json.loads(current_path.read_text()) if current_path.is_file() else {}
+        if nginx:
+            recovery = self.get_deployment_recovery_status({})['recovery']
+            current = recovery.get('current') or {}
+            if recovery.get('blocking') or (current and not self._nginx.probe(current)):
+                current = {}
         service_pid = self._environment.get("master_pid") if nginx else None
         if not nginx and self._service_pid_path.is_file():
             service_pid = self._service_pid_path.read_text(errors="replace").strip().split()[0]
@@ -1267,10 +1343,10 @@ class ols_geo_access_main:
             "service": {"pid": service_pid},
             "config_test": config_report,
             "capabilities": capabilities,
-            "geoip": {"path": str(self._geoip_database), "readable": self._geoip_database.is_file() and os.access(self._geoip_database, os.R_OK)},
-            "domains": {"total": len(records), "protected": None if nginx else len(managed_domains), "configured": len(managed_domains), "active": sum(item.status == "active" for item in records)},
+            "geoip": {"path": str(self._geoip_database), "checked": True, "readable": self._geoip_database.is_file() and os.access(self._geoip_database, os.R_OK)},
+            "domains": {"total": len(records), "protected": len(current.get('managed_snippets', {})) if nginx and current else None if nginx else len(managed_domains), "configured": len(managed_domains), "active": sum(item.status == "active" for item in records)},
             "feeds": feeds,
-            "release": {"current": current.get("release_id"), "previous": current.get("previous_release")},
+            "release": {"current": current.get("release_id"), "previous": current.get("parent_release") if nginx else current.get("previous_release")},
         }}
 
     @_backend_api(ols_only=False)
@@ -1291,9 +1367,10 @@ class ols_geo_access_main:
             item["traffic_detection"] = observation if item["traffic_auto"] and observation and observation.get("assignment") == settings.get(record.domain) else None
             item["can_edit"] = backend["mutation_allowed"]
             if self._webserver_type == "nginx":
-                item["proxy_trust_state"] = "not_verified"
-                item["proxy_trust_blocking"] = True
-                item["proxy_trust_remediation"] = ["Nginx cần xác minh Trusted Proxy ở cấp server; không dùng cấu hình OLS hoặc trust toàn cục."]
+                item['can_edit'] = backend['mutation_allowed'] and record.supported_for_protection
+                item["proxy_trust_state"] = 'server-scoped' if record.supported_for_protection else 'not_verified'
+                item["proxy_trust_blocking"] = not record.supported_for_protection
+                item["proxy_trust_remediation"] = [record.unsupported_reason] if record.unsupported_reason else []
                 result.append(item)
                 continue
             proxy_report = self._proxy_trust_report(
@@ -1318,7 +1395,7 @@ class ols_geo_access_main:
         config_store_module.validate_traffic_detection(payload)
         return payload
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def refresh_traffic_modes(self, _request):
         try:
             with process_lock(self._state_root / "traffic-detection.lock"):
@@ -1327,7 +1404,8 @@ class ols_geo_access_main:
             return {"status": False, "msg": str(error)}
 
     def _refresh_traffic_modes(self):
-        self._require_ols_backend()
+        if self._webserver_type != 'nginx':
+            self._require_ols_backend()
         baseline = load_json(self._paths, "domains")
         previous = self._load_traffic_detection()["domains"]
         proposed = copy.deepcopy(baseline)
@@ -1618,7 +1696,7 @@ class ols_geo_access_main:
                 "summary": traffic_report["activity"]["summary"],
             },
         }
-    @_backend_api()
+    @_backend_api(nginx=True)
     def save_domains(self, request):
         payload = self._payload(request)
         try:
@@ -1651,7 +1729,7 @@ class ols_geo_access_main:
                 "status": False,
                 "stage": getattr(error, "deployment_stage", "unknown"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
-                "recovery_required": isinstance(error, RecoveryRequired),
+                "recovery_required": isinstance(error, (RecoveryRequired, nginx_transactions.NginxRecoveryRequired)),
                 "msg": "Không thể áp dụng rule website.",
             }
         return {"status": True, "deployment": deployment}
@@ -1662,7 +1740,7 @@ class ols_geo_access_main:
             "exceptions": load_json(self._paths, "woo_exceptions"),
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def save_exceptions(self, request):
         payload = self._payload(request)
         assignments = load_json(self._paths, "domains")["domains"]
@@ -1682,7 +1760,7 @@ class ols_geo_access_main:
                 "status": False,
                 "stage": getattr(error, "deployment_stage", "unknown"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
-                "recovery_required": isinstance(error, RecoveryRequired),
+                "recovery_required": isinstance(error, (RecoveryRequired, nginx_transactions.NginxRecoveryRequired)),
                 "msg": "Không thể áp dụng ngoại lệ.",
             }
         return {
@@ -1694,7 +1772,7 @@ class ols_geo_access_main:
     def get_ip_allowlist(self, _request):
         return {"status": True, "allowlist": load_json(self._paths, "ip_allowlist")}
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def save_ip_allowlist(self, request):
         payload = self._payload(request)
         previous = load_json(self._paths, "ip_allowlist")
@@ -1728,7 +1806,7 @@ class ols_geo_access_main:
                 "status": False,
                 "stage": getattr(error, "deployment_stage", "unknown"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
-                "recovery_required": isinstance(error, RecoveryRequired),
+                "recovery_required": isinstance(error, (RecoveryRequired, nginx_transactions.NginxRecoveryRequired)),
                 "msg": "Không thể áp dụng IP tin cậy.",
             }
         return {"status": True, "deployment": deployment, "allowlist": payload}
@@ -1741,7 +1819,7 @@ class ols_geo_access_main:
             "sources": describe_service_sources(allowlist, state),
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True)
     def update_service_ip_sources(self, request):
         payload = self._payload(request) if request else {}
         target_id = payload.get("id", "jetpack")
@@ -1808,9 +1886,10 @@ class ols_geo_access_main:
             database.update({"size": self._geoip_database.stat().st_size, "modified_at": self._geoip_database.stat().st_mtime})
         return {"status": True, "credentials": credentials, "database": database}
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def save_maxmind_credentials(self, request):
         payload = self._payload(request)
+        candidate = None
         candidate_credentials = (
             self._plugin_root
             / "tmp"
@@ -1843,11 +1922,13 @@ class ols_geo_access_main:
                 "status": False,
                 "stage": getattr(error, "maxmind_stage", "download"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
-                "recovery_required": isinstance(error, MaxMindRecoveryRequired),
+                "recovery_required": isinstance(error, (MaxMindRecoveryRequired, nginx_prerequisites.PrerequisiteRecoveryRequired)),
                 "msg": "Thiết lập GeoIP thất bại.",
             }
         finally:
             candidate_credentials.unlink(missing_ok=True)
+            if self._webserver_type == 'nginx':
+                nginx_prerequisites.cleanup_candidate(self._plugin_root, candidate)
         self._audit.record_action("maxmind.credentials.save", {
             "result": "success",
             "account_id": credentials["account_id"],
@@ -1857,11 +1938,12 @@ class ols_geo_access_main:
             "status": True,
             "credentials": credentials,
             "database": database,
-            "geoip": {"active": True, "transaction": database["config_transaction"]},
+            "geoip": {"active": self._webserver_type != 'nginx', "database_ready": True, "transaction": database["config_transaction"]},
         }
 
-    @_backend_api()
+    @_backend_api(nginx=True, runtime_only=True)
     def update_geoip_database(self, _request):
+        candidate = None
         try:
             candidate = self._maxmind_downloader(
                 self._maxmind_credentials, self._maxmind_staging
@@ -1882,16 +1964,19 @@ class ols_geo_access_main:
                 "status": False,
                 "stage": getattr(error, "maxmind_stage", "download"),
                 "rolled_back": bool(getattr(error, "rolled_back", False)),
-                "recovery_required": isinstance(error, MaxMindRecoveryRequired),
+                "recovery_required": isinstance(error, (MaxMindRecoveryRequired, nginx_prerequisites.PrerequisiteRecoveryRequired)),
                 "msg": "Không thể cập nhật GeoIP.",
             }
+        finally:
+            if self._webserver_type == 'nginx':
+                nginx_prerequisites.cleanup_candidate(self._plugin_root, candidate)
         self._audit.record_action(
             "maxmind.database.update", {**result, "result": "success"}
         )
         return {
             "status": True,
             "database": result,
-            "geoip": {"active": True, "transaction": result["config_transaction"]},
+            "geoip": {"active": self._webserver_type != 'nginx', "database_ready": True, "transaction": result["config_transaction"]},
         }
 
     @_backend_api()

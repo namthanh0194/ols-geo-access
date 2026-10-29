@@ -1,12 +1,15 @@
 #!/bin/sh
 set -eu
 python_bin=${OLS_GEO_ACCESS_PYTHON:-/usr/bin/python3}
+prefix=${OLS_GEO_ACCESS_PREFIX:-}
+case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
+if test -z "${OLS_GEO_ACCESS_PYTHON:-}" && test -x "$prefix/www/server/panel/pyenv/bin/python3"; then
+  python_bin="$prefix/www/server/panel/pyenv/bin/python3"
+fi
 "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || {
   echo 'Python 3.10 or newer is required.' >&2
   exit 1
 }
-prefix=${OLS_GEO_ACCESS_PREFIX:-}
-case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
 plugin_dir="$prefix/www/server/panel/plugin/ols_geo_access"
 data_dir="$plugin_dir/data"
 test -d "$data_dir"
@@ -45,10 +48,22 @@ restore() {
   fi
 }
 trap 'restore' HUP INT TERM
-if ! "$python_bin" - "$data_dir" "$plugin_dir/data/providers.default.json" <<'PY'
+if ! "$python_bin" - "$data_dir" "$plugin_dir/data/providers.default.json" "$backend" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
 root = Path(sys.argv[1])
+if sys.argv[3] == 'nginx':
+    for path in root.glob('*.json'):
+        if path.is_symlink():
+            raise SystemExit('Symlinked Nginx data file')
+        if not path.name.startswith('update-') and not path.name.endswith('.default.json'):
+            if json.loads(path.read_text()).get('schema_version') != 1:
+                raise SystemExit('Unsupported Nginx data schema')
+    traffic = root / 'traffic_detection.json'
+    if not traffic.exists():
+        traffic.write_text('{"schema_version":1,"domains":{}}\n')
+        traffic.chmod(0o600)
+    sys.exit(0)
 
 def merge_missing(current, defaults):
     for key, value in defaults.items():
@@ -96,9 +111,12 @@ if ! "$python_bin" "$plugin_dir/backend_lifecycle.py" persist "$plugin_dir" >/de
   restore
   exit 1
 fi
+if test "$backend" = nginx && ! "$python_bin" "$plugin_dir/prepare_nginx.py" "$plugin_dir"; then
+  restore
+  exit 1
+fi
 trap - HUP INT TERM
 cron_dir="$prefix/etc/cron.d"
-if test "$backend" = openlitespeed; then
 mkdir -p "$cron_dir"
 printf '%s\n' \
   '17 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_feeds.py >> /www/server/panel/plugin/ols_geo_access/logs/feed-update.log 2>&1' \
@@ -106,9 +124,6 @@ printf '%s\n' \
   '0 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
   > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
-else
-  rm -f "$cron_dir/ols-geo-access"
-fi
 "$python_bin" - "$data_dir/backups" <<'PY'
 import shutil, sys
 from pathlib import Path

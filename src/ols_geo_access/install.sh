@@ -2,13 +2,16 @@
 set -eu
 
 python_bin=${OLS_GEO_ACCESS_PYTHON:-/usr/bin/python3}
+prefix=${OLS_GEO_ACCESS_PREFIX:-}
+case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
+if test -z "${OLS_GEO_ACCESS_PYTHON:-}" && test -x "$prefix/www/server/panel/pyenv/bin/python3"; then
+  python_bin="$prefix/www/server/panel/pyenv/bin/python3"
+fi
 "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' || {
   echo 'Python 3.10 or newer is required.' >&2
   exit 1
 }
 
-prefix=${OLS_GEO_ACCESS_PREFIX:-}
-case "$prefix" in *..*) echo "Unsafe prefix" >&2; exit 1;; esac
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 plugin_parent="$prefix/www/server/panel/plugin"
 plugin_dir="$plugin_parent/ols_geo_access"
@@ -53,15 +56,11 @@ if test ! -f "$state"; then printf '%s\n' '{"schema_version":1}' > "$state"; fi
 chmod 600 "$state"
 "$python_bin" "$plugin_dir/backend_lifecycle.py" persist "$plugin_dir" >/dev/null
 if test "$backend" = nginx; then
-  if test -e "$prefix/etc/cron.d/ols-geo-access"; then
-    rm -f "$prefix/etc/cron.d/ols-geo-access"
-  fi
-  printf '%s\n' '{"schema_version":1,"result":"ok","backend":"nginx","diagnostic_only":true}' > "$plugin_dir/logs/install-audit.json"
-  chmod 600 "$plugin_dir/logs/install-audit.json"
-  "$python_bin" "$plugin_dir/sync_icon.py"
-  exit 0
-fi
+  "$python_bin" "$plugin_dir/prepare_nginx.py" "$plugin_dir"
+  cloudflare_result='{"status":true,"skipped":"nginx_install_does_not_activate_rules"}'
+else
 cloudflare_result=$("$python_bin" "$plugin_dir/update_cloudflare.py" --ensure --allow-packaged-fallback)
+fi
 cron_dir="$prefix/etc/cron.d"
 mkdir -p "$cron_dir"
 printf '%s\n' \
@@ -70,8 +69,10 @@ printf '%s\n' \
   '0 3 * * * root /usr/bin/python3 /www/server/panel/plugin/ols_geo_access/update_traffic.py >/dev/null 2>&1' \
   > "$cron_dir/ols-geo-access"
 chmod 644 "$cron_dir/ols-geo-access"
-"$python_bin" "$plugin_dir/update_feeds.py" >> "$plugin_dir/logs/feed-update.log" 2>&1 || true
-"$python_bin" - "$plugin_dir/logs/install-audit.json" "$ols_bin" "$cloudflare_result" <<'PY'
+if test "$backend" = openlitespeed; then
+  "$python_bin" "$plugin_dir/update_feeds.py" >> "$plugin_dir/logs/feed-update.log" 2>&1 || true
+fi
+"$python_bin" - "$plugin_dir/logs/install-audit.json" "$ols_bin" "$cloudflare_result" "$backend" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -79,6 +80,7 @@ path = Path(sys.argv[1])
 document = {
     "schema_version": 1,
     "result": "ok",
+    "backend": sys.argv[4],
     "ols_binary": sys.argv[2],
     "cloudflare": json.loads(sys.argv[3]),
 }

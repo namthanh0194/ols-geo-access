@@ -109,6 +109,17 @@ def run(
     if allow_packaged_fallback and mode != "ensure":
         raise ValueError("packaged fallback is valid only for ensure mode")
     plugin_root = Path(plugin_root)
+    if load_persisted_backend(PluginPaths(plugin_root)) == 'nginx':
+        from backend_lifecycle import nginx_app
+        app = nginx_app(plugin_root, str(prefix))
+        missing = app._nginx.requirements()
+        state = app._nginx.status()
+        if missing or not state['current'] or state['current']['status'] == 'deactivated':
+            return {'status': True, 'skipped': 'nginx_not_active', 'requirements': missing}
+        if mode != 'scheduled':
+            return {'status': False, 'code': 'nginx_explicit_apply_required'}
+        app._cloudflare_downloader = downloader
+        return app._nginx.refresh_cloudflare()
     server_config, openlitespeed, lswsctrl = _runtime_paths(plugin_root, Path(prefix))
     timestamp = _timestamp(now)
     runtime_path = plugin_root / "data/cloudflare_prefixes.json"
@@ -245,9 +256,6 @@ def main(argv=None):
     prefix_text = os.environ.get("OLS_GEO_ACCESS_PREFIX", "")
     prefix = Path(prefix_text or "/")
     plugin_root = prefix / "www/server/panel/plugin/ols_geo_access"
-    if load_persisted_backend(PluginPaths(plugin_root)) == 'nginx':
-        print(json.dumps({'status': True, 'skipped': 'nginx_diagnostic_only'}))
-        return 0
     try:
         result = run(
             mode,

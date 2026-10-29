@@ -147,6 +147,48 @@ def _nginx_path(value, roots=None):
     return path
 
 
+def _nginx_lua_end(text, index):
+    depth = 1
+    while index < len(text):
+        if text[index] == '\x00':
+            raise ValueError('NUL in Lua block')
+        comment = text.startswith('--', index)
+        if comment:
+            index += 2
+        long_string = re.match(r'\[(=*)\[', text[index:]) if text[index:index + 1] == '[' else None
+        if long_string:
+            ending = ']' + long_string.group(1) + ']'
+            end = text.find(ending, index + len(long_string.group()))
+            if end < 0:
+                raise ValueError('Unterminated Lua long string')
+            index = end + len(ending)
+        elif comment:
+            newline = text.find('\n', index)
+            if newline < 0:
+                raise ValueError('Unterminated Lua block')
+            index = newline + 1
+        elif text[index] in '\"\'':
+            quote = text[index]
+            index += 1
+            while index < len(text) and text[index] != quote:
+                index += 2 if text[index] == '\\' else 1
+            if index >= len(text):
+                raise ValueError('Unterminated Lua string')
+            index += 1
+        elif text[index] == '{':
+            depth += 1
+            if depth > 64:
+                raise ValueError('Lua nesting limit exceeded')
+            index += 1
+        elif text[index] == '}':
+            depth -= 1
+            index += 1
+            if not depth:
+                return index
+        else:
+            index += 1
+    raise ValueError('Unterminated Lua block')
+
 def _nginx_tokens(text):
     tokens = []
     index = 0
@@ -160,8 +202,16 @@ def _nginx_tokens(text):
             index = len(text) if newline < 0 else newline + 1
             continue
         if char in "{};":
+            directive = []
+            for kind, value in reversed(tokens):
+                if kind != 'word':
+                    break
+                directive.insert(0, value)
             tokens.append((char, char))
             index += 1
+            if char == '{' and directive and directive[0].endswith('_by_lua_block'):
+                index = _nginx_lua_end(text, index)
+                tokens.append(('}', '}'))
         else:
             word = []
             quote = None
@@ -361,6 +411,8 @@ def _nginx_servers(tree, expected_names):
     for arguments, children in tree:
         if arguments[0] == "include" and children is None:
             continue
+        if arguments[0] == 'proxy_cache_path' and children is None:
+            continue
         if arguments != ("server",) or children is None:
             raise ValueError("Unsupported top-level Nginx structure")
         servers.append(children)
@@ -375,8 +427,12 @@ def _nginx_servers(tree, expected_names):
         all_points = sum(fields[0] is _NGINX_GUARD for fields, nested in _nginx_walk(children))
         if len(points) != 1 or all_points != 1:
             raise ValueError("Every server block requires exactly one server-level extension include")
-        if any(fields[0] in {"return", "rewrite", "if"} for fields, nested in children[:points[0]]):
+        if any(fields[0] in {"return", "rewrite", "if"} or '_by_lua' in str(fields[0])
+               for fields, nested in children[:points[0]]):
             raise ValueError("Server rewrite/return can bypass the extension guard")
+        if any(str(fields[0]).startswith(('rewrite_by_lua', 'server_rewrite_by_lua'))
+               for fields, nested in _nginx_walk(children)):
+            raise ValueError('Lua rewrite phase requires manual review')
         for fields, nested in children:
             if fields[0] == "root":
                 if nested is not None or len(fields) != 2 or "$" in fields[1] or not Path(fields[1]).is_absolute():
@@ -395,7 +451,8 @@ def collect_domains_nginx(database_path, vhost_root, traffic_modes=None, managed
     if not vhost_root.is_dir():
         raise ValueError("Nginx vhost directory is unavailable")
     prefix = _nginx_path(config_prefix) if config_prefix is not None else None
-    roots = (vhost_root, *(_nginx_path(root) for root in include_roots), *((prefix,) if prefix else ()))
+    roots = (vhost_root, _nginx_path(vhost_root.parent / 'rewrite'),
+             *(_nginx_path(root) for root in include_roots), *((prefix,) if prefix else ()))
     sites = _nginx_database(database_path)
     traffic_modes = traffic_modes or {}
     managed_domains = set(managed_domains or ())

@@ -4,6 +4,21 @@ Plugin aaPanel cho OpenLiteSpeed giúp áp dụng chính sách truy cập theo q
 
 > Plugin là third-party plugin. Không sửa file core aaPanel trong `class/` hoặc `class_v2/`.
 
+## Đang phát triển — bảo vệ Nginx (chưa phát hành)
+
+- Nginx có đường lưu/áp dụng policy, staging, rollback và khôi phục giao dịch riêng; không dùng cơ chế cấu hình OpenLiteSpeed. Tệp JSON và snapshot thay đổi cùng cấu hình trong giao dịch có backup/checksum.
+- Chỉ mở thao tác khi xác minh đúng runtime, module RealIP, module GeoIP2 đã nạp, MMDB hợp lệ và HTTP include phù hợp. Mỗi website phải có extension include ở vị trí an toàn; không tự sửa vhost không đủ điều kiện.
+- Hỗ trợ phân tích Lua block ACME, `proxy_cache_path` và rewrite include của aaPanel. Lua rewrite phase hoặc vị trí guard không an toàn vẫn bị từ chối.
+- Chạy `nginx -t`, reload có xác minh worker và xác nhận generation qua Unix socket riêng trước khi báo thành công. Khi lỗi, khôi phục cấu hình/settings; từ chối ghi đè file đã bị sửa bên ngoài.
+- Cài/nâng cấp chuẩn bị plugin, cron và điều kiện GeoIP2, không tự bật rule. Nếu module đã được nạp thì dùng lại, không build/reload; nếu thiếu, tự biên dịch module từ source có checksum đã ghim, đối chiếu ABI với binary đang chạy, sao lưu cấu hình rồi kiểm tra/reload có xác minh. Không thay binary hoặc nâng cấp Nginx. Cron bỏ qua backend chưa sẵn sàng/chưa kích hoạt. Domain chọn **Tự động** được kiểm tra lúc **03:00 hằng ngày theo giờ máy chủ**, không truy vấn DNS trên từng request.
+- CIDR Cloudflare không đổi: cập nhật metadata trong giao dịch, không reload. Uninstall chỉ gỡ artifact do plugin sở hữu, kiểm tra cấu hình và xác minh worker trước khi xóa mã nguồn.
+- Tự biên dịch hiện hỗ trợ **Nginx 1.28.3 trên Debian/Ubuntu**; installer chỉ cài thêm dependency build bằng apt khi thiếu, chạy mô phỏng và từ chối nếu cần nâng cấp/gỡ package đang có. Phiên bản chưa có checksum đã ghim bị từ chối, không thử nạp module đoán tương thích. Gói nguồn, archive apt riêng và thư mục build tự xóa sau thành công hoặc lỗi; giữ tối đa 5 backup/giao dịch đã hoàn tất, không xóa giao dịch cần khôi phục.
+- Database GeoLite2-Country hợp lệ có sẵn được dùng lại. Nếu thiếu và đã có credentials, installer tự tải từ MaxMind; nếu chưa có, nhập Account ID/License Key một lần trong UI. Thiết lập GeoIP không yêu cầu bật rule trước. Bản này từ chối thay database khi đang có release bảo vệ Nginx, để không làm lệch dữ liệu của runtime; thống kê crawler chi tiết vẫn chỉ hỗ trợ OpenLiteSpeed.
+- Dashboard phân biệt “Chưa kiểm tra” với “Chưa có”; lỗi xác minh hiển thị mã lỗi và lý do từ bộ nhận diện, không kết luận thiếu GeoIP khi chưa kiểm tra runtime.
+- Installer khởi tạo feed crawler đang bật theo đường snapshot-only, không triển khai rule hoặc đổi phân nhóm domain. Nếu nguồn feed lỗi, dashboard giữ trạng thái chờ; cron feed tiếp tục thử khi chưa kích hoạt Nginx, tránh vòng lặp “chưa có feed nên không bật được, chưa bật nên không tải feed”. Khi có bảo vệ đang chạy, vẫn dùng cập nhật có giao dịch như trước.
+
+Đây là source đang phát triển; tag `v0.2.9` đã phát hành vẫn chỉ hỗ trợ chẩn đoán Nginx. Chưa tăng version hoặc triển khai production.
+
 ## Phiên bản 0.2.9 — Nginx chẩn đoán
 
 - Tự xác minh webserver aaPanel đang thực sự phục vụ HTTP/HTTPS và lưu định danh backend; từ chối cài/nâng cấp khi runtime không rõ hoặc khác backend đã lưu.

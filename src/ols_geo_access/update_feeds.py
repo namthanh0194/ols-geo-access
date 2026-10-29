@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -17,10 +18,23 @@ from lib.audit_log import rotate_log_file
 from lib.backend_detector import load_persisted_backend
 from lib.paths import PluginPaths
 
-def main():
-    if load_persisted_backend(PluginPaths(ROOT)) == 'nginx':
-        print(json.dumps({'status': True, 'skipped': 'nginx_diagnostic_only'}))
+def main(prepare_only=False):
+    manager = None
+    bootstrap = False
+    backend = load_persisted_backend(PluginPaths(ROOT))
+    if prepare_only and backend != 'nginx':
+        print(json.dumps({'status': True, 'skipped': 'prepare_only_requires_nginx'}))
         return 0
+    if backend == 'nginx':
+        from backend_lifecycle import nginx_app
+        manager = nginx_app(ROOT, os.environ.get('OLS_GEO_ACCESS_PREFIX', ''))
+        missing = manager._nginx.requirements()
+        state = manager._nginx.status()
+        inactive = not state['current'] or state['current']['status'] == 'deactivated'
+        bootstrap = inactive
+        if state['blocking'] or (prepare_only and not inactive) or (missing and not inactive):
+            print(json.dumps({'status': True, 'skipped': 'nginx_not_active', 'requirements': missing}))
+            return 0
     data = ROOT / "data"
     settings = json.loads((data / "config.json").read_text())
     if not settings.get("auto_update_feeds", True):
@@ -50,6 +64,8 @@ def main():
         "hubspot": download_hubspot_feed,
         "jetpack": download_jetpack_feed,
     }
+    if bootstrap:
+        service_fetchers = {}
     for service_id, fetcher in sorted(service_fetchers.items()):
         try:
             service_payloads[service_id] = fetcher()
@@ -64,8 +80,8 @@ def main():
         except Exception as error:
             errors["service_allowlist"] = getattr(error, "code", "invalid_format")
 
-    manager = ols_geo_access_main(plugin_root=ROOT)
-    result = manager.apply_scheduled_updates(candidates, allowlist_candidate)
+    manager = manager or ols_geo_access_main(plugin_root=ROOT)
+    result = manager._nginx.bootstrap_snapshots(candidates) if bootstrap else manager.apply_scheduled_updates(candidates, allowlist_candidate)
     if not result.get("status"):
         errors["deployment"] = result.get("code", "deployment_failed")
     print(json.dumps({
@@ -83,4 +99,4 @@ def main():
     return 0 if not errors else 1
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main('--prepare-only' in sys.argv[1:]))

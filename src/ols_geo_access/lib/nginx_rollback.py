@@ -16,6 +16,7 @@ from lib.baseline_repair import sha256_bytes
 from lib.config_validator import validate_domain
 from lib.domain_inventory import collect_domains_nginx
 from lib.paths import PluginPaths
+from lib.domain_inventory import _nginx_parse
 
 IDENTIFIER_PATTERN = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}")
 MANAGED_NAME = "00-ols-geo-access.conf"
@@ -229,13 +230,50 @@ def _release_manifest(manifest, release_id):
             raise ValueError("Invalid Nginx snippet path binding")
 
 
+def _setting_name(name):
+    allowed = set(PluginPaths.DATA_FILES.values()) - {'backend_identity.json', 'proxy_trust_state.json'}
+    if not isinstance(name, str) or (name not in allowed and not re.fullmatch(r'snapshots/[a-z][a-z0-9_-]{0,63}\.json', name)):
+        raise ValueError('Invalid Nginx settings path')
+    return name
+
+def _candidate_settings(context, release_id):
+    root = context.releases / _identifier(release_id)
+    manifest = _load_json(root / 'manifest.json')
+    settings = manifest.get('settings', {})
+    if not isinstance(settings, dict) or len(settings) > 128:
+        raise ValueError('Invalid Nginx settings manifest')
+    output = {}
+    for name, digest in settings.items():
+        content, snapshot = _read_file(root / 'settings' / _setting_name(name))
+        if not snapshot['exists'] or snapshot['sha256'] != digest:
+            raise ValueError('Nginx release settings checksum mismatch')
+        output[name] = content
+    return output
+
+def _setting_entries(context, journal):
+    entries = journal.get('settings', {})
+    if not isinstance(entries, dict) or len(entries) > 128:
+        raise ValueError('Invalid Nginx settings journal')
+    for name, change in entries.items():
+        _setting_name(name)
+        if not isinstance(change, dict) or set(change) != {'before', 'after', 'restored'} or change['restored'] != change['before']:
+            raise ValueError('Invalid Nginx settings transition')
+        for snapshot in change.values():
+            _validate_snapshot(snapshot)
+    return entries
+
 def build_nginx_release(release_id, releases_root, http_conf_content, server_snippets,
-                        parent_release=None, created_at=None):
+                        parent_release=None, created_at=None, *, settings=None):
     _identifier(release_id)
     if parent_release is not None:
         _identifier(parent_release)
     root = _safe_path(releases_root) / release_id
     bodies = {"http.conf": http_conf_content}
+    settings = settings or {}
+    if not isinstance(settings, dict) or len(settings) > 128:
+        raise ValueError('Invalid Nginx release settings')
+    for name, content in settings.items():
+        bodies['settings/' + _setting_name(name)] = content
     for domain, content in server_snippets.items():
         validate_domain(domain)
         bodies[f"snippets/{domain}.conf"] = content
@@ -251,6 +289,7 @@ def build_nginx_release(release_id, releases_root, http_conf_content, server_sni
         "http_conf": {"sha256": sha256_bytes(bodies["http.conf"])},
         "server_snippets": {domain: {"relative_path": f"extension/{domain}/{MANAGED_NAME}",
                                     "sha256": sha256_bytes(bodies[f"snippets/{domain}.conf"])} for domain in sorted(server_snippets)},
+        "settings": {name: sha256_bytes(bodies['settings/' + name]) for name in settings},
     }
     _write_json(root / "manifest.json", manifest)
     return manifest
@@ -286,8 +325,12 @@ class _Context:
             raise ValueError("An explicit Nginx service probe is required")
         self.adapter, self.probe = adapter, probe
         self.runtime = self._runtime()
-        if self.http.parent != Path(self.runtime["main_config"]).parent or self.http.name != "ols_geo_access_http.conf":
+        legacy_http = self.http.parent == Path(self.runtime['main_config']).parent and self.http.name == 'ols_geo_access_http.conf'
+        wildcard_http = self.http == self.vhosts / '00-ols-geo-access-http.conf'
+        if not legacy_http and not wildcard_http:
             raise ValueError("Invalid managed Nginx HTTP target")
+        if wildcard_http:
+            self._verify_http_include()
         if self.vhosts.is_relative_to(self.paths.root) or self.http.is_relative_to(self.paths.root):
             raise ValueError("Nginx live targets overlap plugin state")
         self.binding = {"runtime": self.runtime, "scope": {
@@ -307,6 +350,13 @@ class _Context:
             raise ValueError("Unverified Nginx runtime identity")
         return {"backend": "nginx", "master_pid": runtime["master_pid"], "start_time": runtime["start_time"],
                 **{key: str(_safe_path(runtime[key])) for key in ("binary", "main_config", "prefix")}}
+
+    def _verify_http_include(self):
+        tree = _nginx_parse(_read_file(self.runtime['main_config'])[0].decode())
+        blocks = [children for fields, children in tree if fields == ('http',) and children is not None]
+        expected = ('include', str(self.vhosts / '*.conf'))
+        if len(blocks) != 1 or sum(fields == expected and children is None for fields, children in blocks[0]) != 1:
+            raise ValueError('Missing unique aaPanel HTTP vhost include')
 
     @contextmanager
     def lock(self):
@@ -380,7 +430,7 @@ class _Context:
         if current.get("parent_release") is not None:
             _identifier(current["parent_release"])
         _validate_snapshot(current.get("http_conf"))
-        if not current["http_conf"]["exists"]:
+        if not current["http_conf"]["exists"] and current['status'] != 'deactivated':
             raise ValueError("Nginx current state has no HTTP ownership")
         for domain, snapshot in current["managed_snippets"].items():
             validate_domain(domain)
@@ -462,7 +512,7 @@ def _state_snapshot(current, metadata=None):
     return _snapshot(None if current is None else _json_bytes(current), metadata or {"mode": 0o600, "uid": os.geteuid(), "gid": os.getegid()})
 
 
-def _prepare(context, release_id, bodies, operation, transaction_id):
+def _prepare(context, release_id, bodies, operation, transaction_id, settings=None, expected_settings=None):
     current_bytes, current_snapshot = _read_file(context.state / "current.json")
     current = json.loads(current_bytes) if current_bytes is not None else None
     context.validate_current(current)
@@ -490,7 +540,7 @@ def _prepare(context, release_id, bodies, operation, transaction_id):
             restored_current["managed_snippets"].pop(domain, None)
     next_current = {
         "schema_version": SCHEMA_VERSION, "backend": "nginx", "binding": context.binding,
-        "release_id": release_id, "parent_release": current["release_id"] if current else None,
+        "release_id": release_id, "parent_release": (current.get('parent_release') if operation == 'metadata' else current['release_id']) if current else None,
         "status": "deactivated" if operation == "deactivate" else "active",
         "transaction_id": transaction_id, "applied_at": _timestamp(),
         "http_conf": changes["http"]["after"],
@@ -507,8 +557,24 @@ def _prepare(context, release_id, bodies, operation, transaction_id):
                             "restored": _snapshot(restored_bytes, current_snapshot if current_snapshot["exists"] else None)},
     }
     context.verify(inventory, orphaned)
+    _validate_transition(journal)
     directory = context.state / "transactions" / transaction_id
+    journal['settings'] = {}
+    setting_backups = {}
+    for name, content in (settings or {}).items():
+        target = context.paths.data / _setting_name(name)
+        previous, before = _read_file(target)
+        if expected_settings is not None and before != expected_settings.get(name, before):
+            raise ValueError('Nginx settings changed before deployment')
+        if not isinstance(content, bytes) or len(content) > MAX_FILE_BYTES:
+            raise ValueError('Invalid Nginx settings content')
+        after = _snapshot(content, before if before['exists'] else None)
+        journal['settings'][name] = {'before': before, 'after': after, 'restored': before}
+        if previous is not None:
+            setting_backups[name] = previous
     _mkdir(directory)
+    for name, previous in setting_backups.items():
+        _write_file(directory / 'backup/settings' / name, previous, _snapshot(previous), ABSENT)
     for key, content in backups.items():
         _save_backup(directory, key, content)
     _save_backup(directory, "current", current_bytes)
@@ -518,6 +584,9 @@ def _prepare(context, release_id, bodies, operation, transaction_id):
 
 def _assert_view(context, journal, phase, current_snapshot):
     context.verify(journal["inventory"], journal["orphaned_domains"])
+    for name, change in _setting_entries(context, journal).items():
+        if _read_file(context.paths.data / name)[1] != change[phase]:
+            raise ValueError('Nginx settings changed during transaction')
     for key, change in journal["changes"].items():
         if _read_file(context.target(key))[1] != change[phase]:
             raise ValueError("Nginx file changed before service operation: " + key)
@@ -530,13 +599,18 @@ def _validate_transition(journal):
     proposed = journal["next_current"]
     restored = journal["restored_current"]
     operation = journal.get("operation")
-    if (not isinstance(operation, str) or operation not in {"apply", "rollback", "deactivate"}
+    metadata_only = operation == 'metadata'
+    if metadata_only and (not previous or previous['status'] != 'active' or proposed['release_id'] != previous['release_id']
+                          or any(change['before'] != change['after'] for change in journal['changes'].values())):
+        raise ValueError('Metadata transaction cannot change Nginx configuration')
+    expected_parent = (previous.get('parent_release') if metadata_only else previous['release_id']) if previous else None
+    if (not isinstance(operation, str) or operation not in {"apply", "rollback", "deactivate", "metadata"}
             or type(journal.get("reload_attempted")) is not bool
             or proposed["transaction_id"] != journal["transaction_id"]
             or proposed["release_id"] != journal["release_id"]
-            or proposed.get("parent_release") != (previous["release_id"] if previous else None)
+            or proposed.get("parent_release") != expected_parent
             or proposed["status"] != ("deactivated" if operation == "deactivate" else "active")
-            or (journal["status"] in {"applied", "deactivated", "verified", "reload_requested"} and not journal["reload_attempted"])):
+            or (journal["status"] in {"applied", "deactivated", "verified", "reload_requested"} and not journal["reload_attempted"] and not metadata_only)):
         raise ValueError("Invalid Nginx transaction transition")
     ownership = []
     for current in (previous, proposed, restored):
@@ -602,12 +676,26 @@ def _restore(context, transaction_id):
         if actual[key] not in change.values():
             raise ValueError("Nginx file changed externally during recovery: " + key)
     _validate_transition(journal)
+    settings_actual, settings_backups = {}, {}
+    for name, change in _setting_entries(context, journal).items():
+        actual_setting = _read_file(context.paths.data / name)[1]
+        if actual_setting not in change.values():
+            raise ValueError('Nginx settings changed externally during recovery')
+        previous, snapshot = _read_file(directory / 'backup/settings' / name)
+        if snapshot['exists'] != change['before']['exists'] or (snapshot['exists'] and snapshot['sha256'] != change['before']['sha256']):
+            raise ValueError('Nginx settings backup checksum mismatch')
+        settings_actual[name], settings_backups[name] = actual_setting, previous
     if journal["status"] in {"rolled_back", "restored"}:
+        if any(settings_actual[name] != change['restored'] for name, change in _setting_entries(context, journal).items()):
+            raise ValueError('Previously restored Nginx settings changed')
         if any(actual[key] != change["restored"] for key, change in changes.items()):
             raise ValueError("Previously restored Nginx files changed")
         return journal
     journal["status"] = "restoring"
     _write_json(directory / "manifest.json", journal)
+    for name, change in _setting_entries(context, journal).items():
+        context.verify(journal['inventory'], journal['orphaned_domains'])
+        _write_file(context.paths.data / name, settings_backups[name], change['restored'], settings_actual[name])
     for key in [*sorted(set(changes) - {"http"}), "http"]:
         context.verify(journal["inventory"], journal["orphaned_domains"])
         change = changes[key]
@@ -645,16 +733,19 @@ def _mark_recovery(context, transaction_id, error):
     _write_json(path, journal)
 
 
-def _execute(context, release_id, bodies, operation, transaction_id=None):
+def _execute(context, release_id, bodies, operation, transaction_id=None, settings=None, expected_settings=None):
     transaction_id = _identifier(transaction_id or secrets.token_hex(16))
     _pending(context)
-    journal = _prepare(context, release_id, bodies, operation, transaction_id)
+    journal = _prepare(context, release_id, bodies, operation, transaction_id, settings, expected_settings)
     path = context.state / "transactions" / transaction_id / "manifest.json"
     try:
         for key, change in journal["changes"].items():
             context.verify(journal["inventory"], journal["orphaned_domains"])
             _write_file(context.target(key), bodies.get(key) if change["after"]["exists"] else None,
                         change["after"], change["before"])
+        for name, change in _setting_entries(context, journal).items():
+            context.verify(journal['inventory'], journal['orphaned_domains'])
+            _write_file(context.paths.data / name, settings[name], change['after'], change['before'])
         journal["status"] = "files_written"
         _write_json(path, journal)
         _assert_view(context, journal, "after", journal["state_snapshots"]["before"])
@@ -663,12 +754,13 @@ def _execute(context, release_id, bodies, operation, transaction_id=None):
         journal["status"] = "config_validated"
         _write_json(path, journal)
         context.verify(journal["inventory"], journal["orphaned_domains"])
-        journal["reload_attempted"] = True
-        journal["status"] = "reload_requested"
-        _write_json(path, journal)
-        _assert_view(context, journal, "after", journal["state_snapshots"]["before"])
-        if context.adapter.reload_service() is not True:
-            raise RuntimeError("Nginx reload failed")
+        if operation != 'metadata':
+            journal["reload_attempted"] = True
+            journal["status"] = "reload_requested"
+            _write_json(path, journal)
+            _assert_view(context, journal, "after", journal["state_snapshots"]["before"])
+            if context.adapter.reload_service() is not True:
+                raise RuntimeError("Nginx reload failed")
         context.verify(journal["inventory"], journal["orphaned_domains"])
         if context.probe(journal["next_current"]) is not True:
             raise RuntimeError("Nginx service probe failed")
@@ -678,6 +770,10 @@ def _execute(context, release_id, bodies, operation, transaction_id=None):
                 raise ValueError("Nginx file changed before commit")
         journal["status"] = "verified"
         _write_json(path, journal)
+        _assert_view(context, journal, 'after', journal['state_snapshots']['before'])
+        for name, change in _setting_entries(context, journal).items():
+            if _read_file(context.paths.data / name)[1] != change['after']:
+                raise ValueError('Nginx settings changed before commit')
         context.verify(journal["inventory"], journal["orphaned_domains"])
         _write_file(context.state / "current.json", _json_bytes(journal["next_current"]),
                     journal["state_snapshots"]["after"], journal["state_snapshots"]["before"])
@@ -702,7 +798,7 @@ def _execute(context, release_id, bodies, operation, transaction_id=None):
 
 
 def apply_nginx_release(release_id, releases_root, vhost_root, http_conf_target, state_root,
-                        adapter, transaction_id=None, acquire_lock=True, *, database_path, probe):
+                        adapter, transaction_id=None, acquire_lock=True, *, database_path, probe, expected_settings=None):
     _identifier(release_id)
     if transaction_id is not None:
         _identifier(transaction_id)
@@ -712,7 +808,18 @@ def apply_nginx_release(release_id, releases_root, vhost_root, http_conf_target,
     with context.lock():
         _pending(context)
         bodies = _candidate(context, release_id, releases_root)
-        return _execute(context, release_id, bodies, "apply", transaction_id)
+        settings = _candidate_settings(context, release_id)
+        content, metadata = _read_file(context.state / 'current.json')
+        current = json.loads(content) if content is not None else None
+        context.validate_current(current)
+        if current and current['status'] == 'active' and current['release_id'] == release_id:
+            owned = {'http': current['http_conf'], **current['managed_snippets']}
+            if set(owned) == set(bodies) and all(_read_file(context.target(key)) == (body, owned[key]) for key, body in bodies.items()):
+                if all(_read_file(context.paths.data / name)[0] == body for name, body in settings.items()):
+                    if context.probe(current) is not True:
+                        raise NginxRecoveryRequired('Current Nginx release probe failed')
+                    return {'status': 'unchanged', 'release_id': release_id, 'transaction_id': current['transaction_id']}
+        return _execute(context, release_id, bodies, "apply", transaction_id, settings, expected_settings)
 
 
 def restore_nginx_release_transaction(transaction_id, state_root, vhost_root, http_conf_target,
@@ -740,10 +847,12 @@ def rollback_nginx_release(releases_root, vhost_root, http_conf_target, state_ro
         context.validate_current(current)
         release_id = target_release_id or (current["release_id"] if current["status"] == "deactivated" else current.get("parent_release"))
         _identifier(release_id)
-        return _execute(context, release_id, _candidate(context, release_id, releases_root), "rollback")
+        return _execute(context, release_id, _candidate(context, release_id, releases_root), "rollback",
+                        settings=_candidate_settings(context, release_id))
 
 
-def deactivate_nginx_managed_release(vhost_root, http_conf_target, state_root, adapter, *, database_path, probe):
+def deactivate_nginx_managed_release(vhost_root, http_conf_target, state_root, adapter, *, database_path, probe,
+                                     http_content=b'# deactivated\n', settings=None, remove_http=False):
     context = _Context(vhost_root, http_conf_target, state_root, adapter, database_path, probe)
     with context.lock():
         _pending(context)
@@ -756,4 +865,4 @@ def deactivate_nginx_managed_release(vhost_root, http_conf_target, state_root, a
             if _read_file(context.http)[1] != current["http_conf"]:
                 raise ValueError("Deactivated Nginx placeholder changed")
             return {"status": "deactivated", "managed_files": 1, "transaction_id": current["transaction_id"]}
-        return _execute(context, current["release_id"], {"http": b"# deactivated\n"}, "deactivate")
+        return _execute(context, current["release_id"], {} if remove_http else {"http": http_content}, "deactivate", settings=settings)
