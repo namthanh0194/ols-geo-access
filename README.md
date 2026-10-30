@@ -19,7 +19,9 @@ Plugin aaPanel cho OpenLiteSpeed và Nginx giúp áp dụng chính sách truy c�
 
 Tag `v0.2.9` chỉ hỗ trợ chẩn đoán Nginx; từ `v0.3.0` có cơ chế bảo vệ Nginx nêu trên. Việc phát hành mã nguồn không tự cập nhật production; người quản trị chủ động cập nhật qua giao diện plugin.
 
-### Nhật ký truy cập Nginx — v0.3.4
+### Sửa lỗi cập nhật OLS & Nhật ký truy cập Nginx — v0.3.5
+
+- Khắc phục lỗi `upgrade.sh` văng `FileNotFoundError` khi cập nhật plugin trên OpenLiteSpeed nếu thư mục release lịch sử trong `generated/releases/` đã bị dọn dẹp hoặc thiếu manifest.
 
 - Tab **Nhật ký truy cập** dùng chung cho Nginx và OpenLiteSpeed. Trên Nginx, API chỉ đọc yêu cầu runtime đã xác minh; vẫn xem được log khi điều kiện bật bảo vệ/GeoIP chưa đầy đủ.
 - Đọc log Nginx dạng `combined`, với `access_log /www/wwwlogs/<domain>.log;` hoặc khai báo rõ `combined` trong vhost/include của website. Không tự bật log hoặc thay cấu hình Nginx. Đường dẫn tùy chỉnh, log dùng chung/kế thừa, định dạng tùy chỉnh và log bị tắt đều được báo rõ; không diễn giải thành website an toàn.

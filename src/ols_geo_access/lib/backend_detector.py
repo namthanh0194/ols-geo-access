@@ -195,7 +195,19 @@ def _legacy_backend(paths):
     if not isinstance(release_id, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}', release_id):
         raise ValueError('Invalid legacy release id')
     release_root = _safe_path(paths.root, Path('generated/releases') / release_id)
-    release = _read_json(_safe_path(release_root, 'manifest.json'))
+    manifest_path = _safe_path(release_root, 'manifest.json')
+    if not manifest_path.exists():
+        # Release directory or manifest was pruned or missing
+        identity_path = _safe_path(paths.root, 'data/backend_identity.json')
+        if identity_path.exists():
+            try:
+                payload = _read_json(identity_path)
+                if payload.get('backend') == 'openlitespeed':
+                    return 'openlitespeed'
+            except Exception:
+                pass
+        raise ValueError('Unverified legacy OLS provenance: release manifest missing')
+    release = _read_json(manifest_path)
     generated = release.get('generated_checksums')
     managed = current.get('managed_files')
     if release.get('release_id') != release_id or not isinstance(generated, dict) or not generated or not isinstance(managed, dict):
